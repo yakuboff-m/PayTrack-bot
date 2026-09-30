@@ -10,7 +10,7 @@ const TIMEZONE = 'Asia/Seoul';
  * Example: 1 -> "#INV-0001", 42 -> "#INV-0042"
  */
 export function formatInvoiceId(id: number): string {
-  return `#INV-${String(id).padStart(4, '0')}`;
+  return `#INV${String(id).padStart(4, '0')}`;
 }
 
 /**

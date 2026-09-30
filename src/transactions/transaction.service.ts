@@ -257,7 +257,7 @@ export class TransactionService {
 
       // Extract optional note from payment message
       const rawNote = (paymentEvidenceMsg?.caption ?? paymentEvidenceMsg?.text ?? '')
-        .replace(/^\/confirmed(@\w+)?\s*/i, '')
+        .replace(/^\/(paid|confirmed)(@\w+)?\s*/i, '')
         .trim();
       const userNote = rawNote || undefined;
 

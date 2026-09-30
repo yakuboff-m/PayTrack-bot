@@ -6,13 +6,16 @@ import { getConfig } from '../../config/config';
 import { formatInvoiceId, parseInvoiceId } from '../helpers/format.helpers';
 
 /**
- * Checks if a message represents the /confirmed command.
+ * Checks if a message represents the /paid (or /confirmed) command.
  * Checks both msg.text (plain text messages) and msg.caption (photo/document uploads).
  */
-export function isConfirmedCommand(msg: Message): boolean {
+export function isPaidCommand(msg: Message): boolean {
   const text = (msg.text ?? msg.caption ?? '').trim();
-  return /^\/confirmed(@\w+)?(\s|$)/i.test(text);
+  return /^\/(paid|confirmed)(@\w+)?(\s|$)/i.test(text);
 }
+
+// Backward-compatibility export
+export const isConfirmedCommand = isPaidCommand;
 
 export function registerConfirmedHandler(
   bot: Composer<Context>,
@@ -24,11 +27,11 @@ export function registerConfirmedHandler(
     const msg = ctx.message;
     if (!msg) return next();
 
-    const isConfirmed = isConfirmedCommand(msg);
+    const isPaid = isPaidCommand(msg);
 
-    // If not a /confirmed command, check if user uploaded receipt media as a reply without /confirmed
+    // If not a /paid command, check if user uploaded receipt media as a reply without /paid
     // so we can give them an informative auto-deleting hint
-    if (!isConfirmed) {
+    if (!isPaid) {
       if (msg.reply_to_message && ((msg.photo && msg.photo.length > 0) || msg.document)) {
         const senderId = ctx.from?.id;
         if (senderId && config.adminUserIds.includes(senderId)) {
@@ -38,7 +41,7 @@ export function registerConfirmedHandler(
           if (targetTx && targetTx.status === 'PENDING') {
             try {
               const hint = await ctx.reply(
-                `💡 Receipt received! To confirm payment for ${formatInvoiceId(targetTx.id)}, add \`/confirmed\` in the caption or reply with \`/confirmed\`.`,
+                `💡 Receipt received! To mark payment for ${formatInvoiceId(targetTx.id)}, add \`/paid\` in the caption or reply with \`/paid\`.`,
                 { message_thread_id: msg.message_thread_id ?? config.pendingTopicId }
               );
               setTimeout(async () => {
@@ -64,7 +67,7 @@ export function registerConfirmedHandler(
 
     const threadId = msg.message_thread_id ?? config.pendingTopicId;
     const text = (msg.text ?? msg.caption ?? '').trim();
-    const commandArg = text.replace(/^\/confirmed(@\w+)?\s*/i, '').trim();
+    const commandArg = text.replace(/^\/(paid|confirmed)(@\w+)?\s*/i, '').trim();
     const explicitId = parseInvoiceId(commandArg);
 
     const chatId = String(ctx.chat.id);
@@ -92,22 +95,22 @@ export function registerConfirmedHandler(
       }
     }
 
-    // Fallback: If not found via reply, check if explicit invoice ID was provided (e.g. /confirmed #INV-0001)
+    // Fallback: If not found via reply, check if explicit invoice ID was provided (e.g. /paid #INV0001)
     if (!transaction && explicitId) {
       transaction = transactionService.findById(explicitId);
     }
 
     if (!transaction) {
       await ctx.reply(
-        '❌ Invalid confirmation.\n\n' +
-        'Reply to the invoice with /confirmed (and optional receipt), or type /confirmed #INV-0001.',
+        '❌ Invalid payment confirmation.\n\n' +
+        'Reply to the invoice with /paid (and optional receipt), or type /paid #INV0001.',
         { message_thread_id: threadId },
       );
       return;
     }
 
     if (transaction.status !== 'PENDING') {
-      await ctx.reply(`❌ Transaction ${formatInvoiceId(transaction.id)} has already been confirmed.`, {
+      await ctx.reply(`❌ Transaction ${formatInvoiceId(transaction.id)} has already been paid.`, {
         message_thread_id: threadId,
       });
       return;
@@ -128,7 +131,7 @@ export function registerConfirmedHandler(
       // Confirmation succeeded — send a brief confirmation that auto-deletes
       try {
         const successMsg = await ctx.reply(
-          `✅ Transaction ${formatInvoiceId(transaction.id)} confirmed.\n🔗 ${result.confirmationUrl}`,
+          `✅ Transaction ${formatInvoiceId(transaction.id)} paid.\n🔗 ${result.confirmationUrl}`,
           { message_thread_id: threadId },
         );
         // Auto-delete the success message after 10 seconds
@@ -141,7 +144,7 @@ export function registerConfirmedHandler(
     } else {
       // Confirmation failed — originals are preserved
       await ctx.reply(
-        `❌ Confirmation failed for ${formatInvoiceId(transaction.id)}.\n\n` +
+        `❌ Payment confirmation failed for ${formatInvoiceId(transaction.id)}.\n\n` +
         `The original transaction and payment message were not removed.\n` +
         `Please try again.\n\n` +
         `Error: ${result.error}`,

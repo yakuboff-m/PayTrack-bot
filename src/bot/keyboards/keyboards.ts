@@ -59,5 +59,5 @@ export function editFieldKeyboard(distributorId: number): InlineKeyboard {
  * Builds the "Copy Account Number" button using Telegram's native copy_text.
  */
 export function copyAccountKeyboard(accountNumber: string): InlineKeyboard {
-  return new InlineKeyboard().copyText('📋 Copy Account Number', accountNumber);
+  return new InlineKeyboard().copyText('Copy Account Number', accountNumber);
 }

@@ -11,7 +11,7 @@ export function registerHelpHandler(bot: Composer<Context>): void {
 3\\. Reply to it with the amount\\.
    Example: \`/amount 280,700\`
 4\\. When payment is made, reply to the transaction with the payment message\\.
-5\\. Add \`/confirmed\` to the payment message\\.
+5\\. Add \`/paid\` to the payment message\\.
 6\\. The bot copies the transaction \\+ payment evidence to Confirmed\\.
 7\\. Pending keeps a small history record with a link to the confirmation\\.
 

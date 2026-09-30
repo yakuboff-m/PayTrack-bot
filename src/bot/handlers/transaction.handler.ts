@@ -69,7 +69,7 @@ export function registerTransactionHandler(
     const rawAmount = match[2]?.trim() || null;
 
     // Skip known framework commands
-    const reservedCommands = ['help', 'distributors', 'add_distributor', 'amount', 'confirmed', 'start'];
+    const reservedCommands = ['help', 'distributors', 'add_distributor', 'amount', 'confirmed', 'paid', 'start'];
     if (reservedCommands.includes(alias)) return next();
 
     // Look up distributor by alias
