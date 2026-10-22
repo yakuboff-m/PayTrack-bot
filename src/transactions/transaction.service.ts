@@ -1,7 +1,7 @@
 import type { Api } from 'grammy';
 import type { InlineKeyboardMarkup, Message } from 'grammy/types';
 import { TransactionRepository } from './transaction.repository';
-import { getConfig } from '../config/config';
+import { getConfig, type Config } from '../config/config';
 import {
   buildMessageLink,
   detectMessageType,
@@ -24,13 +24,20 @@ import type {
 } from '../types';
 
 /**
- * In-memory lock set to prevent duplicate /confirmed processing.
+ * In-memory lock set to prevent duplicate /confirmed processing within the same isolate.
  * Keyed by transaction ID.
  */
 const processingLocks = new Set<number>();
 
 export class TransactionService {
-  constructor(private repo: TransactionRepository) {}
+  constructor(
+    private repo: TransactionRepository,
+    private config?: Config
+  ) {}
+
+  private getEffectiveConfig(): Config {
+    return this.config ?? getConfig();
+  }
 
   // ─── Row → Domain mapping ────────────────────────────────
 
@@ -60,43 +67,45 @@ export class TransactionService {
 
   // ─── Registration ─────────────────────────────────────────
 
-  registerTransaction(chatId: string, topicId: number, messageId: number): Transaction {
-    const row = this.repo.create(chatId, topicId, messageId, nowISO());
+  async registerTransaction(chatId: string, topicId: number, messageId: number): Promise<Transaction> {
+    const row = await this.repo.create(chatId, topicId, messageId, nowISO());
     return this.toDomain(row);
   }
 
-  findById(id: number): Transaction | undefined {
-    const row = this.repo.findById(id);
+  async findById(id: number): Promise<Transaction | undefined> {
+    const row = await this.repo.findById(id);
     return row ? this.toDomain(row) : undefined;
   }
 
-  findByMessageId(chatId: string, messageId: number): Transaction | undefined {
-    const row = this.repo.findByMessageId(chatId, messageId);
+  async findByMessageId(chatId: string, messageId: number): Promise<Transaction | undefined> {
+    const row = await this.repo.findByMessageId(chatId, messageId);
     return row ? this.toDomain(row) : undefined;
   }
 
   /** Finds a transaction by original or bot-resent message ID. */
-  findByAnyMessageId(chatId: string, messageId: number): Transaction | undefined {
-    const row = this.repo.findByAnyMessageId(chatId, messageId);
+  async findByAnyMessageId(chatId: string, messageId: number): Promise<Transaction | undefined> {
+    const row = await this.repo.findByAnyMessageId(chatId, messageId);
     return row ? this.toDomain(row) : undefined;
   }
 
   // ─── Distributor Assignment ───────────────────────────────
 
-  assignDistributor(
+  async assignDistributor(
     transactionId: number,
     distributorId: number,
     snapshot: DistributorSnapshot
-  ): Transaction {
-    this.repo.updateDistributor(transactionId, distributorId, JSON.stringify(snapshot));
-    return this.toDomain(this.repo.findById(transactionId)!);
+  ): Promise<Transaction> {
+    await this.repo.updateDistributor(transactionId, distributorId, JSON.stringify(snapshot));
+    const row = await this.repo.findById(transactionId);
+    return this.toDomain(row!);
   }
 
   // ─── Amount ───────────────────────────────────────────────
 
-  setAmount(transactionId: number, amount: number): Transaction {
-    this.repo.updateAmount(transactionId, amount);
-    return this.toDomain(this.repo.findById(transactionId)!);
+  async setAmount(transactionId: number, amount: number): Promise<Transaction> {
+    await this.repo.updateAmount(transactionId, amount);
+    const row = await this.repo.findById(transactionId);
+    return this.toDomain(row!);
   }
 
   // ─── Bot Message Management ───────────────────────────────
@@ -214,7 +223,7 @@ export class TransactionService {
     }
 
     // Persist the bot message ID
-    this.repo.updateMetadataMessageId(transaction.id, botMsg.message_id);
+    await this.repo.updateMetadataMessageId(transaction.id, botMsg.message_id);
 
     return { botMessageId: botMsg.message_id };
   }
@@ -226,8 +235,8 @@ export class TransactionService {
    * This is failure-safe/ordered: creative operations first, then DB commit,
    * then destructive cleanup. If any creative step fails, originals are preserved.
    *
-   * Uses an in-memory lock to prevent duplicate processing and re-checks
-   * the transaction status before the final DB commit.
+   * Uses an in-memory lock to prevent duplicate processing within the isolate,
+   * and an atomic database compare-and-swap for distributed safety.
    */
   async executeConfirmation(
     api: Api,
@@ -236,7 +245,7 @@ export class TransactionService {
     invoiceMsg?: Message,
     paymentEvidenceMsg?: Message
   ): Promise<ConfirmationResult> {
-    const config = getConfig();
+    const config = this.getEffectiveConfig();
     const chatId = config.telegramGroupId;
 
     // ── Acquire processing lock ──────────────────────────────
@@ -247,6 +256,9 @@ export class TransactionService {
       };
     }
     processingLocks.add(transaction.id);
+
+    let confirmedMsgId: number | undefined;
+    let historyMsgId: number | undefined;
 
     try {
       const paidAt = nowISO();
@@ -281,8 +293,6 @@ export class TransactionService {
 
       const invoiceDoc = invoiceMsg?.document?.file_id ?? null;
       const paymentDoc = paymentEvidenceMsg?.document?.file_id ?? null;
-
-      let confirmedMsgId: number;
 
       try {
         if (invoicePhoto && paymentPhoto) {
@@ -367,7 +377,6 @@ export class TransactionService {
       // ── Phase 2: Record in Pending + DB ────────────────────
 
       // Create history record in Pending topic
-      let historyMsg: Message.TextMessage;
       try {
         const historyText = formatHistoryRecord(
           distributorName,
@@ -378,10 +387,15 @@ export class TransactionService {
           transaction.id,
           userNote
         );
-        historyMsg = await api.sendMessage(chatId, historyText, {
+        const historyMsg = await api.sendMessage(chatId, historyText, {
           message_thread_id: config.pendingTopicId,
         });
+        historyMsgId = historyMsg.message_id;
       } catch (err: unknown) {
+        // Rollback confirmed message if history record failed
+        if (confirmedMsgId) {
+          try { await api.deleteMessage(chatId, confirmedMsgId); } catch { /* best effort */ }
+        }
         return {
           success: false,
           error: `Failed to create history record: ${(err as Error).message}`,
@@ -389,17 +403,75 @@ export class TransactionService {
       }
 
       // Update DB — compare-and-swap
-      const committed = this.repo.markPaid(
-        transaction.id,
-        paidAt,
-        paymentEvidenceMsg?.message_id ?? commandMessageId,
-        confirmedMsgId,
-        confirmationUrl,
-        historyMsg.message_id
-      );
+      let committed = false;
+      try {
+        committed = await this.repo.markPaid(
+          transaction.id,
+          paidAt,
+          paymentEvidenceMsg?.message_id ?? commandMessageId,
+          confirmedMsgId,
+          confirmationUrl,
+          historyMsgId
+        );
+      } catch (dbErr: unknown) {
+        // A D1 error or network timeout occurred. Verify whether the database actually committed!
+        let verificationSucceeded = false;
+        try {
+          const verifyTx = await this.repo.findById(transaction.id);
+          verificationSucceeded = true;
+          if (
+            verifyTx &&
+            verifyTx.status === 'PAID' &&
+            verifyTx.confirmation_message_id === confirmedMsgId
+          ) {
+            // The write succeeded on the database before the network error/timeout!
+            // Do NOT delete the confirmation messages — treat as committed.
+            committed = true;
+          }
+        } catch (verifyErr: unknown) {
+          console.error(
+            `Verification query also failed after markPaid error for transaction ${transaction.id}:`,
+            (verifyErr as Error).message
+          );
+        }
+
+        if (committed) {
+          // Treated as committed — proceed to Phase 3 cleanup
+        } else if (!verificationSucceeded) {
+          // Both the write and the verification query failed!
+          // Commit status is UNCERTAIN. Do NOT delete confirmation messages
+          // to prevent accidentally deleting a successfully committed transaction.
+          console.error(
+            `Transaction ${transaction.id} commit status is uncertain. Preserving Telegram confirmation messages.`
+          );
+          return {
+            success: false,
+            error: `Database write and verification both failed. Commit status is uncertain; Telegram messages were preserved to prevent data loss. Original error: ${(dbErr as Error).message}`,
+          };
+        } else {
+          // Verification query succeeded and confirmed that the row was NOT committed with our confirmation message.
+          // It is safe to clean up our orphan messages.
+          if (historyMsgId) {
+            try { await api.deleteMessage(chatId, historyMsgId); } catch { /* best effort */ }
+          }
+          if (confirmedMsgId) {
+            try { await api.deleteMessage(chatId, confirmedMsgId); } catch { /* best effort */ }
+          }
+          return {
+            success: false,
+            error: `Database update failed: ${(dbErr as Error).message}`,
+          };
+        }
+      }
 
       if (!committed) {
-        try { await api.deleteMessage(chatId, historyMsg.message_id); } catch { /* best effort */ }
+        // Rollback BOTH history record and confirmed message on duplicate confirmation
+        if (historyMsgId) {
+          try { await api.deleteMessage(chatId, historyMsgId); } catch { /* best effort */ }
+        }
+        if (confirmedMsgId) {
+          try { await api.deleteMessage(chatId, confirmedMsgId); } catch { /* best effort */ }
+        }
         return {
           success: false,
           error: 'Transaction was already confirmed by another request.',
@@ -447,4 +519,3 @@ export class TransactionService {
     }
   }
 }
-

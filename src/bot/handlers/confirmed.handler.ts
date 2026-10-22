@@ -2,7 +2,7 @@ import type { Composer, Context } from 'grammy';
 import type { Message } from 'grammy/types';
 import type { Transaction } from '../../types';
 import { TransactionService } from '../../transactions/transaction.service';
-import { getConfig } from '../../config/config';
+import { getConfig, type Config } from '../../config/config';
 import { formatInvoiceId, parseInvoiceId } from '../helpers/format.helpers';
 
 /**
@@ -17,11 +17,34 @@ export function isPaidCommand(msg: Message): boolean {
 // Backward-compatibility export
 export const isConfirmedCommand = isPaidCommand;
 
+function scheduleDelete(ctx: Context, chatId: number, messageId: number, delayMs: number): void {
+  const deleteTask = async () => {
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+    try {
+      await ctx.api.deleteMessage(chatId, messageId);
+    } catch {
+      /* ignore */
+    }
+  };
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const anyCtx = ctx as any;
+  const executionContext = anyCtx.executionContext;
+  if (executionContext && typeof executionContext.waitUntil === 'function') {
+    executionContext.waitUntil(deleteTask());
+  } else if (typeof anyCtx.waitUntil === 'function') {
+    anyCtx.waitUntil(deleteTask());
+  } else {
+    setTimeout(deleteTask, delayMs);
+  }
+}
+
 export function registerConfirmedHandler(
   bot: Composer<Context>,
-  transactionService: TransactionService
+  transactionService: TransactionService,
+  customConfig?: Config
 ): void {
-  const config = getConfig();
+  const config = customConfig ?? getConfig();
 
   bot.on('message', async (ctx, next) => {
     const msg = ctx.message;
@@ -37,19 +60,17 @@ export function registerConfirmedHandler(
         if (senderId && config.adminUserIds.includes(senderId)) {
           const chatId = String(ctx.chat.id);
           const repliedMsg = msg.reply_to_message;
-          const targetTx = transactionService.findByAnyMessageId(chatId, repliedMsg.message_id);
+          const targetTx = await transactionService.findByAnyMessageId(chatId, repliedMsg.message_id);
           if (targetTx && targetTx.status === 'PENDING') {
             try {
               const hint = await ctx.reply(
                 `💡 Receipt received! To mark payment for ${formatInvoiceId(targetTx.id)}, add \`/paid\` in the caption or reply with \`/paid\`.`,
                 { message_thread_id: msg.message_thread_id ?? config.pendingTopicId }
               );
-              setTimeout(async () => {
-                try {
-                  await ctx.api.deleteMessage(ctx.chat.id, hint.message_id);
-                } catch { /* ignore */ }
-              }, 15_000);
-            } catch { /* ignore */ }
+              scheduleDelete(ctx, ctx.chat.id, hint.message_id, 15_000);
+            } catch {
+              /* ignore */
+            }
           }
         }
       }
@@ -79,12 +100,12 @@ export function registerConfirmedHandler(
       (msg.photo && msg.photo.length > 0) || msg.document ? msg : undefined;
 
     if (repliedMsg) {
-      transaction = transactionService.findByAnyMessageId(chatId, repliedMsg.message_id);
+      transaction = await transactionService.findByAnyMessageId(chatId, repliedMsg.message_id);
       invoiceMsg = repliedMsg;
 
       const parentRepliedMsg = (repliedMsg as unknown as { reply_to_message?: Message }).reply_to_message;
       if (!transaction && parentRepliedMsg) {
-        const parentTx = transactionService.findByAnyMessageId(chatId, parentRepliedMsg.message_id);
+        const parentTx = await transactionService.findByAnyMessageId(chatId, parentRepliedMsg.message_id);
         if (parentTx) {
           transaction = parentTx;
           invoiceMsg = parentRepliedMsg;
@@ -97,7 +118,7 @@ export function registerConfirmedHandler(
 
     // Fallback: If not found via reply, check if explicit invoice ID was provided (e.g. /paid #INV0001)
     if (!transaction && explicitId) {
-      transaction = transactionService.findById(explicitId);
+      transaction = await transactionService.findById(explicitId);
     }
 
     if (!transaction) {
@@ -134,13 +155,11 @@ export function registerConfirmedHandler(
           `✅ Transaction ${formatInvoiceId(transaction.id)} paid.\n🔗 ${result.confirmationUrl}`,
           { message_thread_id: threadId },
         );
-        // Auto-delete the success message after 10 seconds
-        setTimeout(async () => {
-          try {
-            await ctx.api.deleteMessage(ctx.chat.id, successMsg.message_id);
-          } catch { /* ignore */ }
-        }, 10_000);
-      } catch { /* ignore */ }
+        // Auto-delete the success message after 10 seconds (via waitUntil in Worker, or setTimeout in Node)
+        scheduleDelete(ctx, ctx.chat.id, successMsg.message_id, 10_000);
+      } catch {
+        /* ignore */
+      }
     } else {
       // Confirmation failed — originals are preserved
       await ctx.reply(

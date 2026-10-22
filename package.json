@@ -7,19 +7,24 @@
     "dev": "tsx watch src/main.ts",
     "build": "tsc",
     "start": "node dist/main.js",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test test/**/*.test.ts",
+    "wrangler:dev": "wrangler dev",
+    "wrangler:build": "wrangler deploy --dry-run"
   },
   "dependencies": {
-    "grammy": "^1.35.0",
     "better-sqlite3": "^11.7.0",
-    "dotenv": "^16.4.7",
     "date-fns": "^4.1.0",
-    "date-fns-tz": "^3.2.0"
+    "date-fns-tz": "^3.2.0",
+    "dotenv": "^16.4.7",
+    "grammy": "^1.35.0"
   },
   "devDependencies": {
-    "typescript": "^5.7.0",
-    "tsx": "^4.19.0",
+    "@cloudflare/workers-types": "^5.20261018.1",
     "@types/better-sqlite3": "^7.6.12",
-    "@types/node": "^22.10.0"
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "wrangler": "^4.151.1"
   }
 }

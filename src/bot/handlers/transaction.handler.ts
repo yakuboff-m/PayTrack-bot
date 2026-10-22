@@ -1,5 +1,5 @@
 import type { Composer, Context } from 'grammy';
-import { getConfig } from '../../config/config';
+import { getConfig, type Config } from '../../config/config';
 import { TransactionService } from '../../transactions/transaction.service';
 import { DistributorService } from '../../distributors/distributor.service';
 import { requireAdmin } from '../middleware/auth.middleware';
@@ -15,9 +15,10 @@ export function registerTransactionHandler(
   bot: Composer<Context>,
   transactionService: TransactionService,
   distributorService: DistributorService,
-  getBotId: () => number
+  getBotId: () => number,
+  customConfig?: Config
 ): void {
-  const config = getConfig();
+  const config = customConfig ?? getConfig();
 
   // ─── Auto-registration of new transactions ───────────────
 
@@ -43,7 +44,7 @@ export function registerTransactionHandler(
     // Register the transaction
     const chatId = String(ctx.chat.id);
     try {
-      transactionService.registerTransaction(chatId, config.pendingTopicId, msg.message_id);
+      await transactionService.registerTransaction(chatId, config.pendingTopicId, msg.message_id);
       console.log(`📝 Auto-registered transaction: message ${msg.message_id}`);
     } catch (err: unknown) {
       console.warn('Auto-registration skipped:', (err as Error).message);
@@ -57,7 +58,7 @@ export function registerTransactionHandler(
   // Matches: /abc  or  /abc 280700  or  /abc 280,700
   // The optional second part is the amount.
 
-  bot.on('message:text', requireAdmin, async (ctx, next) => {
+  bot.on('message:text', requireAdmin(customConfig), async (ctx, next) => {
     const msg = ctx.message;
     const text = msg.text.trim();
 
@@ -73,7 +74,7 @@ export function registerTransactionHandler(
     if (reservedCommands.includes(alias)) return next();
 
     // Look up distributor by alias
-    const distributor = distributorService.findByAlias(alias);
+    const distributor = await distributorService.findByAlias(alias);
     if (!distributor) return next();
 
     // Must be a reply to a message
@@ -89,10 +90,10 @@ export function registerTransactionHandler(
     const chatId = String(ctx.chat.id);
 
     // Find transaction (check both original and bot message IDs)
-    let transaction = transactionService.findByAnyMessageId(chatId, repliedMsg.message_id);
+    let transaction = await transactionService.findByAnyMessageId(chatId, repliedMsg.message_id);
     if (!transaction) {
       try {
-        transaction = transactionService.registerTransaction(
+        transaction = await transactionService.registerTransaction(
           chatId, config.pendingTopicId, repliedMsg.message_id
         );
       } catch {
@@ -112,21 +113,21 @@ export function registerTransactionHandler(
 
     // Assign distributor
     const snapshot = distributorService.createSnapshot(distributor);
-    transactionService.assignDistributor(transaction.id, distributor.id, snapshot);
+    await transactionService.assignDistributor(transaction.id, distributor.id, snapshot);
 
     // If amount was provided inline (e.g., /abc 280700), set it too
     let amount = transaction.amount;
     if (rawAmount) {
       const parsed = parseAmount(rawAmount);
       if (parsed !== null) {
-        transactionService.setAmount(transaction.id, parsed);
+        await transactionService.setAmount(transaction.id, parsed);
         amount = parsed;
       }
       // If parsing fails, silently ignore — distributor is still assigned
     }
 
     // Reload to get final state
-    const updated = transactionService.findByAnyMessageId(chatId, repliedMsg.message_id)!;
+    const updated = (await transactionService.findByAnyMessageId(chatId, repliedMsg.message_id))!;
 
     // Build keyboard with copy button
     const kb = copyAccountKeyboard(distributor.accountNumber);

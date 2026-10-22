@@ -8,6 +8,15 @@ export interface Config {
   adminUserIds: number[];
 }
 
+export function getBotIdFromToken(token: string): number {
+  const rawId = token.split(':')[0];
+  const id = parseInt(rawId, 10);
+  if (isNaN(id)) {
+    throw new Error('Invalid BOT_TOKEN format; cannot extract bot ID from token.');
+  }
+  return id;
+}
+
 function requireEnv(name: string): string {
   const value = process.env[name];
   if (!value || value.trim() === '') {
@@ -25,7 +34,7 @@ function parseIntEnv(name: string): number {
   return parsed;
 }
 
-function parseAdminIds(raw: string): number[] {
+export function parseAdminIds(raw: string): number[] {
   return raw
     .split(',')
     .map((s) => s.trim())
@@ -37,6 +46,45 @@ function parseAdminIds(raw: string): number[] {
       }
       return id;
     });
+}
+
+function parseRequiredInt(val: string | number | undefined, name: string): number {
+  if (val === undefined || val === null || String(val).trim() === '') {
+    throw new Error(`Missing ${name} in environment`);
+  }
+  const parsed = parseInt(String(val).trim(), 10);
+  if (isNaN(parsed)) {
+    throw new Error(`Environment variable ${name} must be a valid integer, got: "${val}"`);
+  }
+  return parsed;
+}
+
+export function parseConfigFromEnv(env: {
+  BOT_TOKEN?: string;
+  TELEGRAM_GROUP_ID?: string | number;
+  TELEGRAM_PENDING_TOPIC_ID?: string | number;
+  TELEGRAM_CONFIRMED_TOPIC_ID?: string | number;
+  TELEGRAM_ADMIN_USER_IDS?: string;
+}): Config {
+  if (!env.BOT_TOKEN || env.BOT_TOKEN.trim() === '') {
+    throw new Error('Missing BOT_TOKEN in environment');
+  }
+  if (!env.TELEGRAM_ADMIN_USER_IDS || env.TELEGRAM_ADMIN_USER_IDS.trim() === '') {
+    throw new Error('Missing TELEGRAM_ADMIN_USER_IDS in environment');
+  }
+
+  const adminUserIds = parseAdminIds(String(env.TELEGRAM_ADMIN_USER_IDS));
+  if (adminUserIds.length === 0) {
+    throw new Error('TELEGRAM_ADMIN_USER_IDS must contain at least one user ID');
+  }
+
+  return {
+    botToken: env.BOT_TOKEN.trim(),
+    telegramGroupId: parseRequiredInt(env.TELEGRAM_GROUP_ID, 'TELEGRAM_GROUP_ID'),
+    pendingTopicId: parseRequiredInt(env.TELEGRAM_PENDING_TOPIC_ID, 'TELEGRAM_PENDING_TOPIC_ID'),
+    confirmedTopicId: parseRequiredInt(env.TELEGRAM_CONFIRMED_TOPIC_ID, 'TELEGRAM_CONFIRMED_TOPIC_ID'),
+    adminUserIds,
+  };
 }
 
 export function loadConfig(): Config {

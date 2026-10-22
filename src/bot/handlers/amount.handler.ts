@@ -2,18 +2,19 @@ import type { Composer, Context } from 'grammy';
 import { TransactionService } from '../../transactions/transaction.service';
 import { DistributorService } from '../../distributors/distributor.service';
 import { requireAdmin } from '../middleware/auth.middleware';
-import { getConfig } from '../../config/config';
-import { parseAmount, formatAmount } from '../helpers/format.helpers';
+import { getConfig, type Config } from '../../config/config';
+import { parseAmount } from '../helpers/format.helpers';
 import { copyAccountKeyboard } from '../keyboards/keyboards';
 
 export function registerAmountHandler(
   bot: Composer<Context>,
   transactionService: TransactionService,
-  distributorService: DistributorService
+  distributorService: DistributorService,
+  customConfig?: Config
 ): void {
-  const config = getConfig();
+  const config = customConfig ?? getConfig();
 
-  bot.command('amount', requireAdmin, async (ctx) => {
+  bot.command('amount', requireAdmin(customConfig), async (ctx) => {
     const msg = ctx.message;
     if (!msg) return;
 
@@ -49,10 +50,10 @@ export function registerAmountHandler(
     const chatId = String(ctx.chat.id);
 
     // Find transaction (check both original and bot message IDs)
-    let transaction = transactionService.findByAnyMessageId(chatId, repliedMsg.message_id);
+    let transaction = await transactionService.findByAnyMessageId(chatId, repliedMsg.message_id);
     if (!transaction) {
       try {
-        transaction = transactionService.registerTransaction(
+        transaction = await transactionService.registerTransaction(
           chatId, config.pendingTopicId, repliedMsg.message_id
         );
       } catch {
@@ -71,10 +72,10 @@ export function registerAmountHandler(
     }
 
     // Store the amount
-    transactionService.setAmount(transaction.id, amount);
+    await transactionService.setAmount(transaction.id, amount);
 
     // Reload
-    const updated = transactionService.findByAnyMessageId(chatId, repliedMsg.message_id)!;
+    const updated = (await transactionService.findByAnyMessageId(chatId, repliedMsg.message_id))!;
 
     // Build keyboard if distributor is assigned
     const keyboard = updated.distributorSnapshot
