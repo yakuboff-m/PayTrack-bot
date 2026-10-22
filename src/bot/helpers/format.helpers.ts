@@ -1,9 +1,67 @@
 import { format } from 'date-fns';
 import { toZonedTime } from 'date-fns-tz';
-import type { DistributorSnapshot } from '../../types';
+import type { DistributorSnapshot, InvoiceNote } from '../../types';
 import { METADATA_SEPARATOR } from './telegram.helpers';
 
 const TIMEZONE = 'Asia/Seoul';
+
+/**
+ * Formats a Date or ISO string into "d MMM, HH:mm" in Asia/Seoul timezone.
+ * Example: 2026-10-22T01:30:00Z -> "22 Oct, 10:30"
+ */
+export function formatNoteTimestamp(date: Date | string): string {
+  const d = typeof date === 'string' ? new Date(date) : date;
+  const seoulTime = toZonedTime(d, TIMEZONE);
+  return format(seoulTime, 'd MMM, HH:mm');
+}
+
+/**
+ * Formats a list of invoice notes chronologically.
+ */
+export function formatNotesBlock(notes: InvoiceNote[]): string {
+  if (!notes || notes.length === 0) return '';
+  const lines: string[] = ['📝 NOTES:'];
+  notes.forEach((n) => {
+    lines.push(`• ${formatNoteTimestamp(n.createdAt)} — ${n.text}`);
+  });
+  return lines.join('\n');
+}
+
+/**
+ * Parses and extracts an optional note directive (/note <text> or Note: <text>)
+ * from a message or invoice text.
+ */
+export function extractNoteFromText(text: string): { cleanText: string; note: string | null } {
+  if (!text) return { cleanText: '', note: null };
+
+  const lines = text.split(/\r?\n/);
+  const remainingLines: string[] = [];
+  let extractedNote: string | null = null;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    const noteMatch = trimmed.match(/^(?:\/note|note:)\s*(.+)$/i);
+    if (noteMatch && !extractedNote) {
+      extractedNote = noteMatch[1].trim();
+    } else {
+      remainingLines.push(line);
+    }
+  }
+
+  if (!extractedNote) {
+    const inlineMatch = text.match(/\s+(?:\/note|note:)\s*(.+)$/i);
+    if (inlineMatch && inlineMatch.index !== undefined) {
+      extractedNote = inlineMatch[1].trim();
+      const clean = text.substring(0, inlineMatch.index).trim();
+      return { cleanText: clean, note: extractedNote };
+    }
+  }
+
+  return {
+    cleanText: remainingLines.join('\n').trim(),
+    note: extractedNote,
+  };
+}
 
 /**
  * Formats a transaction ID as a readable unique invoice code.
@@ -14,14 +72,69 @@ export function formatInvoiceId(id: number): string {
 }
 
 /**
- * Extracts a numeric invoice ID from user input.
- * Supports "#INV-0001", "INV-0001", "INV-1", "#1", "1".
+ * Extracts a numeric invoice ID from arbitrary text or captions.
+ * Supports patterns like "🆔 #INV0009", "#INV0009", "#INV-0009", "INV0009", "INV-0009", or "#9".
  */
-export function parseInvoiceId(input: string): number | null {
-  const match = input.trim().match(/^(?:#?INV-?|#)?(\d+)$/i);
+export function extractInvoiceIdFromText(text: string): number | null {
+  if (!text) return null;
+  const match =
+    text.match(/(?:🆔\s*)?#?INV-?(\d+)\b/i) ||
+    text.match(/(?:^|[^\w])#(\d+)\b/);
   if (!match) return null;
   const num = parseInt(match[1], 10);
   return isNaN(num) || num <= 0 ? null : num;
+}
+
+/**
+ * Extracts a numeric invoice ID from user input.
+ * Supports "#INV-0001", "INV-0001", "INV-1", "#1", "1", "🆔 #INV0001",
+ * and fallback extraction from caption/text strings.
+ */
+export function parseInvoiceId(input: string): number | null {
+  const trimmed = input.trim();
+  const directMatch = trimmed.match(/^(?:🆔\s*)?(?:#?INV-?|#)?(\d+)$/i);
+  if (directMatch) {
+    const num = parseInt(directMatch[1], 10);
+    return isNaN(num) || num <= 0 ? null : num;
+  }
+  return extractInvoiceIdFromText(trimmed);
+}
+
+/**
+ * Extracts invoice ID, distributor snapshot, and amount from an invoice caption/text.
+ */
+export function parseInvoiceMetadataFromText(text: string): {
+  invoiceId: number | null;
+  distributor: DistributorSnapshot | null;
+  amount: number | null;
+} {
+  const invoiceId = extractInvoiceIdFromText(text);
+
+  let distributor: DistributorSnapshot | null = null;
+  const nameMatch = text.match(/🏢\s*([^\r\n]+)/);
+  const bankMatch = text.match(/🏦\s*([^\r\n]+)/);
+  const accountMatch = text.match(/💳\s*([^\r\n]+)/);
+  const holderMatch = text.match(/👤\s*([^\r\n]+)/);
+
+  if (nameMatch) {
+    distributor = {
+      name: nameMatch[1].trim(),
+      bankName: bankMatch ? bankMatch[1].trim() : '',
+      accountNumber: accountMatch ? accountMatch[1].trim() : '',
+      accountHolder: holderMatch ? holderMatch[1].trim() : '',
+    };
+  }
+
+  let amount: number | null = null;
+  const totalMatch = text.match(/(?:💰\s*Total:\s*|💰\s*)₩?([\d,]+)/i);
+  if (totalMatch) {
+    const rawVal = parseInt(totalMatch[1].replace(/,/g, ''), 10);
+    if (!isNaN(rawVal) && rawVal > 0) {
+      amount = rawVal;
+    }
+  }
+
+  return { invoiceId, distributor, amount };
 }
 
 /**
@@ -73,7 +186,8 @@ export function buildMetadataBlock(
   distributor: DistributorSnapshot | null,
   amount: number | null,
   receivedAt?: string,
-  invoiceId?: number
+  invoiceId?: number,
+  notes?: InvoiceNote[]
 ): string {
   const lines: string[] = [METADATA_SEPARATOR];
 
@@ -96,6 +210,11 @@ export function buildMetadataBlock(
     lines.push(`📅 ${formatTimestamp(receivedAt)}`);
   }
 
+  if (notes && notes.length > 0) {
+    lines.push('');
+    lines.push(formatNotesBlock(notes));
+  }
+
   lines.push(METADATA_SEPARATOR);
   return lines.join('\n');
 }
@@ -109,7 +228,8 @@ export function formatConfirmedHeader(
   receivedAt: string,
   paidAt: string,
   invoiceId?: number,
-  note?: string
+  note?: string,
+  notes?: InvoiceNote[]
 ): string {
   const lines: string[] = [];
   lines.push('━━━━━━━━━━━━');
@@ -120,9 +240,15 @@ export function formatConfirmedHeader(
   lines.push('');
   lines.push(`📥 Received: ${formatTimestamp(receivedAt)}`);
   lines.push(`💸 Paid: ${formatTimestamp(paidAt)}`);
+
+  if (notes && notes.length > 0) {
+    lines.push('');
+    lines.push(formatNotesBlock(notes));
+  }
+
   if (note) {
     lines.push('');
-    lines.push(`📝 Note: ${note}`);
+    lines.push(`📝 Payment Note: ${note}`);
   }
   lines.push('━━━━━━━━━━━━');
 
@@ -139,7 +265,8 @@ export function formatHistoryRecord(
   paidAt: string,
   confirmationUrl: string,
   invoiceId?: number,
-  note?: string
+  note?: string,
+  notes?: InvoiceNote[]
 ): string {
   const lines: string[] = [];
   lines.push('━━━━━━━━━━━━');
@@ -150,9 +277,15 @@ export function formatHistoryRecord(
   lines.push('');
   lines.push(`📥 Received: ${formatTimestamp(receivedAt)}`);
   lines.push(`💸 Paid: ${formatTimestamp(paidAt)}`);
+
+  if (notes && notes.length > 0) {
+    lines.push('');
+    lines.push(formatNotesBlock(notes));
+  }
+
   if (note) {
     lines.push('');
-    lines.push(`📝 Note: ${note}`);
+    lines.push(`📝 Payment Note: ${note}`);
   }
   lines.push('');
   lines.push(`🔗 Confirmation`);

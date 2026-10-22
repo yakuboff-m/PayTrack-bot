@@ -57,15 +57,27 @@ export function splitOriginalAndMetadata(text: string): {
   original: string;
   metadata: string | null;
 } {
-  const sepIndex = text.indexOf(METADATA_SEPARATOR);
-  if (sepIndex === -1) {
-    return { original: text, metadata: null };
+  // Delimiter for metadata block: METADATA_SEPARATOR on its own line followed by an invoice identifier/field
+  const metadataBlockPattern = /(?:^|\n)(━━━━━━━━━━━━\s*\n(?:🆔|🏢|🏦|💳|👤|💰|📅|📝)[\s\S]*)$/;
+  const match = text.match(metadataBlockPattern);
+  if (match && match.index !== undefined) {
+    const sepIndex = match.index === 0 ? 0 : match.index + 1;
+    const original = text.substring(0, sepIndex).trimEnd();
+    const metadata = text.substring(sepIndex);
+    return { original, metadata };
   }
-  // Original is everything before the separator (trimmed of trailing whitespace)
-  const original = text.substring(0, sepIndex).trimEnd();
-  // Metadata is everything from the separator onward
-  const metadata = text.substring(sepIndex);
-  return { original, metadata };
+
+  // Exact single line of 12 chars (METADATA_SEPARATOR)
+  const exactLinePattern = /(?:^|\n)(━━━━━━━━━━━━)(?:\r?\n|$)/;
+  const lineMatch = text.match(exactLinePattern);
+  if (lineMatch && lineMatch.index !== undefined) {
+    const sepIndex = lineMatch.index === 0 ? 0 : lineMatch.index + 1;
+    const original = text.substring(0, sepIndex).trimEnd();
+    const metadata = text.substring(sepIndex);
+    return { original, metadata };
+  }
+
+  return { original: text, metadata: null };
 }
 
 /**

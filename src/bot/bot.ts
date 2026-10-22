@@ -10,6 +10,7 @@ import { registerHelpHandler } from './handlers/help.handler';
 import { registerDistributorHandler } from './handlers/distributor.handler';
 import { registerAmountHandler } from './handlers/amount.handler';
 import { registerConfirmedHandler } from './handlers/confirmed.handler';
+import { registerNoteHandler } from './handlers/note.handler';
 import { registerTransactionHandler } from './handlers/transaction.handler';
 import type { IDatabase } from '../database/adapter';
 import type { IConversationStore } from '../distributors/conversation.store';
@@ -72,6 +73,7 @@ export function createBot(options?: CreateBotOptions): {
   registerDistributorHandler(bot, distributorService, options?.conversationStore, config);
   registerAmountHandler(bot, transactionService, distributorService, config);
   registerConfirmedHandler(bot, transactionService, config);
+  registerNoteHandler(bot, transactionService, config);
 
   // 2. Dynamic distributor alias commands + auto-registration last
   //    (these match broadly and use next() to pass through)

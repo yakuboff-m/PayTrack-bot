@@ -38,6 +38,12 @@ export interface UpdateDistributorInput {
 
 export type TransactionStatus = 'PENDING' | 'PAID';
 
+export interface InvoiceNote {
+  text: string;
+  createdAt: string;
+  author?: string;
+}
+
 export interface Transaction {
   id: number;
   telegramChatId: string;
@@ -55,6 +61,7 @@ export interface Transaction {
   confirmationUrl: string | null;
   historyMessageId: number | null;
   metadataMessageId: number | null;
+  notes: InvoiceNote[];
   createdAt: string;
 }
 
@@ -75,6 +82,7 @@ export interface TransactionRow {
   confirmation_url: string | null;
   history_message_id: number | null;
   metadata_message_id: number | null;
+  notes: string | null;
   created_at: string;
 }
 

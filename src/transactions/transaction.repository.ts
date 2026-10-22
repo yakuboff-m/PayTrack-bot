@@ -13,18 +13,62 @@ export class TransactionRepository {
     chatId: string,
     topicId: number,
     messageId: number,
-    receivedAt: string
+    receivedAt: string,
+    notes?: string
   ): Promise<TransactionRow> {
     const result = await this.db.exec(
-      `INSERT INTO transactions (telegram_chat_id, pending_topic_id, original_message_id, received_at)
-       VALUES (?, ?, ?, ?)`,
-      [chatId, topicId, messageId, receivedAt]
+      `INSERT INTO transactions (telegram_chat_id, pending_topic_id, original_message_id, received_at, notes)
+       VALUES (?, ?, ?, ?, ?)`,
+      [chatId, topicId, messageId, receivedAt, notes ?? '[]']
     );
     const created = await this.findById(result.lastInsertRowid as number);
     if (!created) {
       throw new Error('Failed to retrieve newly created transaction.');
     }
     return created;
+  }
+
+  async restoreOrRegister(params: {
+    id?: number;
+    chatId: string;
+    pendingTopicId: number;
+    messageId: number;
+    distributorSnapshot?: string | null;
+    amount?: number | null;
+    receivedAt: string;
+    notes?: string | null;
+  }): Promise<TransactionRow> {
+    if (params.id) {
+      await this.db.exec(
+        `INSERT INTO transactions (id, telegram_chat_id, pending_topic_id, original_message_id, metadata_message_id, distributor_snapshot, amount, received_at, notes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           metadata_message_id = COALESCE(metadata_message_id, excluded.metadata_message_id),
+           distributor_snapshot = COALESCE(distributor_snapshot, excluded.distributor_snapshot),
+           amount = COALESCE(amount, excluded.amount)`,
+        [
+          params.id,
+          params.chatId,
+          params.pendingTopicId,
+          params.messageId,
+          params.messageId,
+          params.distributorSnapshot ?? null,
+          params.amount ?? null,
+          params.receivedAt,
+          params.notes ?? null,
+        ]
+      );
+      const row = await this.findById(params.id);
+      return row!;
+    } else {
+      return this.create(
+        params.chatId,
+        params.pendingTopicId,
+        params.messageId,
+        params.receivedAt,
+        params.notes ?? undefined
+      );
+    }
   }
 
   async findById(id: number): Promise<TransactionRow | undefined> {
@@ -44,18 +88,39 @@ export class TransactionRepository {
   }
 
   /**
-   * Finds a transaction by checking both original_message_id and metadata_message_id.
-   * After the bot re-sends user media, the metadata_message_id becomes the visible
-   * message that users reply to. This method checks both.
+   * Finds a transaction by checking original, metadata, confirmation, or history message IDs.
+   * Allows replying to an invoice in Pending or Confirmed topics.
+   * Handles chat ID prefix differences (with/without -100) and falls back to matching by message ID.
    */
   async findByAnyMessageId(chatId: string, messageId: number): Promise<TransactionRow | undefined> {
-    const row = await this.db.first<TransactionRow>(
+    const rawChatId = String(chatId);
+    const altChatId = rawChatId.startsWith('-100')
+      ? rawChatId.slice(4)
+      : rawChatId.startsWith('-')
+      ? rawChatId.slice(1)
+      : '-100' + rawChatId;
+
+    let row = await this.db.first<TransactionRow>(
       `SELECT * FROM transactions
-       WHERE telegram_chat_id = ?
-         AND (original_message_id = ? OR metadata_message_id = ?)`,
-      [chatId, messageId, messageId]
+       WHERE (telegram_chat_id = ? OR telegram_chat_id = ?)
+         AND (original_message_id = ? OR metadata_message_id = ? OR confirmation_message_id = ? OR history_message_id = ?)`,
+      [rawChatId, altChatId, messageId, messageId, messageId, messageId]
     );
+
+    if (!row) {
+      row = await this.db.first<TransactionRow>(
+        `SELECT * FROM transactions
+         WHERE (original_message_id = ? OR metadata_message_id = ? OR confirmation_message_id = ? OR history_message_id = ?)
+         ORDER BY id DESC`,
+        [messageId, messageId, messageId, messageId]
+      );
+    }
+
     return row ?? undefined;
+  }
+
+  async updateNotes(id: number, notesJson: string): Promise<void> {
+    await this.db.exec('UPDATE transactions SET notes = ? WHERE id = ?', [notesJson, id]);
   }
 
   async findByPaymentMessageId(

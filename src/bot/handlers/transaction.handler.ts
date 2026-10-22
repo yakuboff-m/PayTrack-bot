@@ -5,7 +5,7 @@ import { TransactionService } from '../../transactions/transaction.service';
 import { DistributorService } from '../../distributors/distributor.service';
 import { requireAdmin } from '../middleware/auth.middleware';
 import { copyAccountKeyboard } from '../keyboards/keyboards';
-import { parseAmount } from '../helpers/format.helpers';
+import { parseAmount, extractNoteFromText, nowISO } from '../helpers/format.helpers';
 import {
   isFromBot,
   isCommand,
@@ -16,6 +16,7 @@ import {
   parseMeatInvoice,
   type MeatInvoice,
 } from '../../transactions/meat-invoice';
+import type { InvoiceNote } from '../../types';
 
 /**
  * In-memory lock set of message IDs currently being processed to prevent duplicate
@@ -55,9 +56,37 @@ export function registerTransactionHandler(
 
     // Register the transaction
     const chatId = String(ctx.chat.id);
+    const rawText = msg.text ?? msg.caption ?? '';
+    const { cleanText, note: initialNoteText } = extractNoteFromText(rawText);
+    const author = msg.from?.username ?? (msg.from?.first_name ? msg.from.first_name : undefined);
+    const initialNotes: InvoiceNote[] = initialNoteText
+      ? [{ text: initialNoteText, createdAt: nowISO(), author }]
+      : [];
+
     try {
-      await transactionService.registerTransaction(chatId, config.pendingTopicId, msg.message_id);
+      const tx = await transactionService.registerTransaction(
+        chatId,
+        config.pendingTopicId,
+        msg.message_id,
+        initialNotes.length > 0 ? initialNotes : undefined
+      );
       console.log(`📝 Auto-registered transaction: message ${msg.message_id}`);
+
+      // If an initial note was supplied, display the note inside the invoice's message
+      if (initialNotes.length > 0) {
+        const displayMsg = {
+          ...msg,
+          text: msg.text !== undefined ? cleanText : undefined,
+          caption: msg.caption !== undefined ? cleanText : undefined,
+        } as Message;
+
+        await transactionService.updateInvoiceNotesDisplay(
+          ctx.api,
+          ctx.chat.id,
+          tx,
+          displayMsg
+        );
+      }
     } catch (err: unknown) {
       console.warn('Auto-registration skipped:', (err as Error).message);
     }
@@ -83,7 +112,7 @@ export function registerTransactionHandler(
     const payload = match[2]?.trim() || null;
 
     // Skip known framework commands
-    const reservedCommands = ['help', 'distributors', 'add_distributor', 'amount', 'confirmed', 'paid', 'start'];
+    const reservedCommands = ['help', 'distributors', 'add_distributor', 'amount', 'confirmed', 'paid', 'start', 'note'];
     if (reservedCommands.includes(alias)) return next();
 
     // Look up distributor by alias
@@ -103,19 +132,33 @@ export function registerTransactionHandler(
     try {
       let meatInvoice: MeatInvoice | undefined;
       let simpleAmount: number | null = null;
+      let effectivePayload = payload;
+      const initialNotes: InvoiceNote[] = [];
 
       if (payload) {
+        const { cleanText, note: payloadNote } = extractNoteFromText(payload);
+        if (payloadNote) {
+          initialNotes.push({
+            text: payloadNote,
+            createdAt: nowISO(),
+            author: msg.from?.username ?? (msg.from?.first_name ? msg.from.first_name : undefined),
+          });
+          effectivePayload = cleanText || null;
+        }
+      }
+
+      if (effectivePayload) {
         // Check if payload is a simple single amount
         const isSimpleAmount =
-          !payload.includes('\n') &&
-          !/[xX×\*]/.test(payload) &&
-          parseAmount(payload) !== null;
+          !effectivePayload.includes('\n') &&
+          !/[xX×\*]/.test(effectivePayload) &&
+          parseAmount(effectivePayload) !== null;
 
         if (isSimpleAmount) {
-          simpleAmount = parseAmount(payload);
+          simpleAmount = parseAmount(effectivePayload);
         } else {
           // Attempt to parse as meat invoice
-          const parsed = parseMeatInvoice(payload);
+          const parsed = parseMeatInvoice(effectivePayload);
           if (!parsed.success) {
             await ctx.reply(`❌ ${parsed.error}`, {
               message_thread_id: threadId,
@@ -153,7 +196,8 @@ export function registerTransactionHandler(
           transaction = await transactionService.registerTransaction(
             chatId,
             config.pendingTopicId,
-            msg.message_id
+            msg.message_id,
+            initialNotes.length > 0 ? initialNotes : undefined
           );
         } catch (err: unknown) {
           const errorMsg = (err as Error).message || '';

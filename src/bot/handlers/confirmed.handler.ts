@@ -3,7 +3,12 @@ import type { Message } from 'grammy/types';
 import type { Transaction } from '../../types';
 import { TransactionService } from '../../transactions/transaction.service';
 import { getConfig, type Config } from '../../config/config';
-import { formatInvoiceId, parseInvoiceId } from '../helpers/format.helpers';
+import {
+  formatInvoiceId,
+  parseInvoiceId,
+  extractInvoiceIdFromText,
+  parseInvoiceMetadataFromText,
+} from '../helpers/format.helpers';
 
 /**
  * Checks if a message represents the /paid (or /confirmed) command.
@@ -114,11 +119,114 @@ export function registerConfirmedHandler(
           }
         }
       }
+
+      // Fallback 1: Extract invoice ID from replied message caption or text (e.g. photo invoice)
+      if (!transaction) {
+        const textToScan = repliedMsg.caption ?? repliedMsg.text ?? '';
+        const parsed = parseInvoiceMetadataFromText(textToScan);
+        if (parsed.invoiceId) {
+          transaction = await transactionService.findById(parsed.invoiceId);
+          if (!transaction) {
+            // Auto-restore transaction from the invoice message metadata
+            try {
+              transaction = await transactionService.restoreOrRegisterTransaction({
+                id: parsed.invoiceId,
+                chatId,
+                pendingTopicId: threadId,
+                messageId: repliedMsg.message_id,
+                distributorSnapshot: parsed.distributor,
+                amount: parsed.amount,
+              });
+            } catch {
+              /* ignore */
+            }
+          }
+          if (transaction) {
+            invoiceMsg = repliedMsg;
+          }
+        }
+      }
+
+      // Fallback 2: Extract invoice ID from parent replied message caption or text
+      if (!transaction && parentRepliedMsg) {
+        const textToScan = parentRepliedMsg.caption ?? parentRepliedMsg.text ?? '';
+        const parsed = parseInvoiceMetadataFromText(textToScan);
+        if (parsed.invoiceId) {
+          transaction = await transactionService.findById(parsed.invoiceId);
+          if (!transaction) {
+            try {
+              transaction = await transactionService.restoreOrRegisterTransaction({
+                id: parsed.invoiceId,
+                chatId,
+                pendingTopicId: threadId,
+                messageId: parentRepliedMsg.message_id,
+                distributorSnapshot: parsed.distributor,
+                amount: parsed.amount,
+              });
+            } catch {
+              /* ignore */
+            }
+          }
+          if (transaction) {
+            invoiceMsg = parentRepliedMsg;
+            if (!paymentEvidenceMsg && ((repliedMsg.photo && repliedMsg.photo.length > 0) || repliedMsg.document)) {
+              paymentEvidenceMsg = repliedMsg;
+            }
+          }
+        }
+      }
+
+      // Fallback 3: If replied to a message in the pending topic but transaction isn't registered yet
+      if (!transaction) {
+        try {
+          transaction = await transactionService.registerTransaction(
+            chatId,
+            threadId,
+            repliedMsg.message_id
+          );
+          if (transaction) {
+            invoiceMsg = repliedMsg;
+          }
+        } catch {
+          /* ignore */
+        }
+      }
     }
 
-    // Fallback: If not found via reply, check if explicit invoice ID was provided (e.g. /paid #INV0001)
+    // Fallback 4: If not found via reply, check explicit ID or scan current command message
     if (!transaction && explicitId) {
       transaction = await transactionService.findById(explicitId);
+      if (!transaction && repliedMsg) {
+        try {
+          transaction = await transactionService.restoreOrRegisterTransaction({
+            id: explicitId,
+            chatId,
+            pendingTopicId: threadId,
+            messageId: repliedMsg.message_id,
+          });
+          if (transaction) {
+            invoiceMsg = repliedMsg;
+          }
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+    if (!transaction) {
+      const msgTextToScan = msg.caption ?? msg.text ?? '';
+      const fallbackId = extractInvoiceIdFromText(msgTextToScan);
+      if (fallbackId) {
+        transaction = await transactionService.findById(fallbackId);
+      }
+    }
+
+    // Keep invoice-to-message mapping synchronized for future lookups
+    if (
+      transaction &&
+      repliedMsg &&
+      (!transaction.metadataMessageId || transaction.metadataMessageId !== repliedMsg.message_id)
+    ) {
+      await transactionService.updateMetadataMessageId(transaction.id, repliedMsg.message_id).catch(() => {});
     }
 
     if (!transaction) {
