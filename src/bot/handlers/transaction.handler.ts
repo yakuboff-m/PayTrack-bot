@@ -1,4 +1,5 @@
 import type { Composer, Context } from 'grammy';
+import type { Message } from 'grammy/types';
 import { getConfig, type Config } from '../../config/config';
 import { TransactionService } from '../../transactions/transaction.service';
 import { DistributorService } from '../../distributors/distributor.service';
@@ -9,7 +10,18 @@ import {
   isFromBot,
   isCommand,
   isReply,
+  METADATA_SEPARATOR,
 } from '../helpers/telegram.helpers';
+import {
+  parseMeatInvoice,
+  type MeatInvoice,
+} from '../../transactions/meat-invoice';
+
+/**
+ * In-memory lock set of message IDs currently being processed to prevent duplicate
+ * registrations during concurrent updates or Telegram retries.
+ */
+const inFlightRegistrations = new Set<string>();
 
 export function registerTransactionHandler(
   bot: Composer<Context>,
@@ -55,19 +67,20 @@ export function registerTransactionHandler(
 
   // ─── Dynamic distributor alias commands ──────────────────
 
-  // Matches: /abc  or  /abc 280700  or  /abc 280,700
-  // The optional second part is the amount.
-
+  // Matches:
+  // 1. /alias
+  // 2. /alias 280700 (simple amount)
+  // 3. /alias <meat invoice lines> (plain-text meat calculator)
   bot.on('message:text', requireAdmin(customConfig), async (ctx, next) => {
     const msg = ctx.message;
     const text = msg.text.trim();
 
-    // Match /alias or /alias <amount>
-    const match = text.match(/^\/([a-z0-9_]+)(?:\s+(.+))?$/i);
+    // Match /alias or /alias <payload> (handles multiline text and optional @bot username)
+    const match = text.match(/^\/([a-z0-9_]+)(?:@\w+)?(?:[\s\n]+([\s\S]+))?$/i);
     if (!match) return next();
 
     const alias = match[1].toLowerCase();
-    const rawAmount = match[2]?.trim() || null;
+    const payload = match[2]?.trim() || null;
 
     // Skip known framework commands
     const reservedCommands = ['help', 'distributors', 'add_distributor', 'amount', 'confirmed', 'paid', 'start'];
@@ -77,83 +90,199 @@ export function registerTransactionHandler(
     const distributor = await distributorService.findByAlias(alias);
     if (!distributor) return next();
 
-    // Must be a reply to a message
-    if (!msg.reply_to_message) {
-      await ctx.reply(
-        `❌ Reply to a transaction message with /${alias} to assign this distributor.`,
-        { message_thread_id: msg.message_thread_id },
-      );
+    const chatId = String(ctx.chat.id);
+    const threadId = msg.message_thread_id ?? config.pendingTopicId;
+    const lockKey = `${chatId}:${msg.message_id}`;
+
+    // Prevent duplicate processing if Telegram retries the update while in flight
+    if (inFlightRegistrations.has(lockKey)) {
       return;
     }
+    inFlightRegistrations.add(lockKey);
 
-    const repliedMsg = msg.reply_to_message;
-    const chatId = String(ctx.chat.id);
+    try {
+      let meatInvoice: MeatInvoice | undefined;
+      let simpleAmount: number | null = null;
 
-    // Find transaction (check both original and bot message IDs)
-    let transaction = await transactionService.findByAnyMessageId(chatId, repliedMsg.message_id);
-    if (!transaction) {
-      try {
-        transaction = await transactionService.registerTransaction(
-          chatId, config.pendingTopicId, repliedMsg.message_id
+      if (payload) {
+        // Check if payload is a simple single amount
+        const isSimpleAmount =
+          !payload.includes('\n') &&
+          !/[xX×\*]/.test(payload) &&
+          parseAmount(payload) !== null;
+
+        if (isSimpleAmount) {
+          simpleAmount = parseAmount(payload);
+        } else {
+          // Attempt to parse as meat invoice
+          const parsed = parseMeatInvoice(payload);
+          if (!parsed.success) {
+            await ctx.reply(`❌ ${parsed.error}`, {
+              message_thread_id: threadId,
+            });
+            return;
+          }
+          meatInvoice = parsed.invoice;
+        }
+      } else if (msg.reply_to_message) {
+        // No payload on command, but user replied to a message
+        // Check if replied message text contains meat invoice lines
+        const repliedText = msg.reply_to_message.text ?? msg.reply_to_message.caption ?? '';
+        if (
+          repliedText &&
+          /[xX×\*]/.test(repliedText) &&
+          !repliedText.includes(METADATA_SEPARATOR)
+        ) {
+          const parsed = parseMeatInvoice(repliedText);
+          if (parsed.success) {
+            meatInvoice = parsed.invoice;
+          }
+        }
+      }
+
+      // ─── Case 1: Meat invoice provided directly (not a reply) ───
+      if (meatInvoice && !msg.reply_to_message) {
+        // Prevent accidental duplicate registration if Telegram retried
+        const existingTx = await transactionService.findByMessageId(chatId, msg.message_id);
+        if (existingTx) {
+          return;
+        }
+
+        let transaction;
+        try {
+          transaction = await transactionService.registerTransaction(
+            chatId,
+            config.pendingTopicId,
+            msg.message_id
+          );
+        } catch (err: unknown) {
+          const errorMsg = (err as Error).message || '';
+          if (errorMsg.includes('UNIQUE') || errorMsg.includes('constraint')) {
+            return; // Duplicate caught by database constraint
+          }
+          throw err;
+        }
+
+        const snapshot = distributorService.createSnapshot(distributor);
+        await transactionService.assignDistributor(transaction.id, distributor.id, snapshot);
+        await transactionService.setAmount(transaction.id, meatInvoice.grandTotal);
+
+        const displayMsg = {
+          ...msg,
+          text: meatInvoice.formattedDisplay,
+        } as Message;
+
+        const kb = copyAccountKeyboard(distributor.accountNumber);
+        const result = await transactionService.updateTransactionDisplay(
+          ctx.api,
+          ctx.chat.id,
+          config.pendingTopicId,
+          displayMsg,
+          transaction,
+          snapshot,
+          meatInvoice.grandTotal,
+          kb
         );
-      } catch {
-        await ctx.reply('❌ Could not find or register this transaction.', {
-          message_thread_id: msg.message_thread_id,
+
+        if ('error' in result) {
+          await ctx.reply(`❌ ${result.error}`, {
+            message_thread_id: threadId,
+          });
+        }
+        return;
+      }
+
+      // ─── Case 2: Must be a reply to an existing transaction ─────
+      if (!msg.reply_to_message) {
+        await ctx.reply(
+          `❌ Reply to a transaction message with /${alias} to assign this distributor.`,
+          { message_thread_id: threadId }
+        );
+        return;
+      }
+
+      const repliedMsg = msg.reply_to_message;
+
+      // Find transaction (check both original and bot message IDs)
+      let transaction = await transactionService.findByAnyMessageId(chatId, repliedMsg.message_id);
+      if (!transaction) {
+        try {
+          transaction = await transactionService.registerTransaction(
+            chatId,
+            config.pendingTopicId,
+            repliedMsg.message_id
+          );
+        } catch {
+          await ctx.reply('❌ Could not find or register this transaction.', {
+            message_thread_id: threadId,
+          });
+          return;
+        }
+      }
+
+      if (transaction.status !== 'PENDING') {
+        await ctx.reply('❌ This transaction has already been confirmed.', {
+          message_thread_id: threadId,
         });
         return;
       }
-    }
 
-    if (transaction.status !== 'PENDING') {
-      await ctx.reply('❌ This transaction has already been confirmed.', {
-        message_thread_id: msg.message_thread_id,
-      });
-      return;
-    }
+      // Assign distributor
+      const snapshot = distributorService.createSnapshot(distributor);
+      await transactionService.assignDistributor(transaction.id, distributor.id, snapshot);
 
-    // Assign distributor
-    const snapshot = distributorService.createSnapshot(distributor);
-    await transactionService.assignDistributor(transaction.id, distributor.id, snapshot);
-
-    // If amount was provided inline (e.g., /abc 280700), set it too
-    let amount = transaction.amount;
-    if (rawAmount) {
-      const parsed = parseAmount(rawAmount);
-      if (parsed !== null) {
-        await transactionService.setAmount(transaction.id, parsed);
-        amount = parsed;
+      // Set amount if either meat invoice total or simple amount was provided
+      let finalAmount = transaction.amount;
+      if (meatInvoice) {
+        finalAmount = meatInvoice.grandTotal;
+        await transactionService.setAmount(transaction.id, finalAmount);
+      } else if (simpleAmount !== null) {
+        finalAmount = simpleAmount;
+        await transactionService.setAmount(transaction.id, finalAmount);
       }
-      // If parsing fails, silently ignore — distributor is still assigned
+
+      // Reload to get latest state
+      const updated = (await transactionService.findByAnyMessageId(chatId, repliedMsg.message_id))!;
+
+      // Build keyboard with copy button
+      const kb = copyAccountKeyboard(distributor.accountNumber);
+
+      // Re-send or edit with new content
+      let displayMsg: Message = repliedMsg;
+      if (meatInvoice) {
+        displayMsg = {
+          ...repliedMsg,
+          text: repliedMsg.text ? meatInvoice.formattedDisplay : undefined,
+          caption: !repliedMsg.text ? meatInvoice.formattedDisplay : undefined,
+        } as Message;
+      }
+
+      const result = await transactionService.updateTransactionDisplay(
+        ctx.api,
+        ctx.chat.id,
+        config.pendingTopicId,
+        displayMsg,
+        updated,
+        snapshot,
+        finalAmount,
+        kb
+      );
+
+      if ('error' in result) {
+        await ctx.reply(`❌ ${result.error}`, {
+          message_thread_id: threadId,
+        });
+        return;
+      }
+
+      // Delete the command message
+      try {
+        await ctx.deleteMessage();
+      } catch {
+        /* ignore */
+      }
+    } finally {
+      inFlightRegistrations.delete(lockKey);
     }
-
-    // Reload to get final state
-    const updated = (await transactionService.findByAnyMessageId(chatId, repliedMsg.message_id))!;
-
-    // Build keyboard with copy button
-    const kb = copyAccountKeyboard(distributor.accountNumber);
-
-    // Re-send as bot-owned message (or edit if already bot-owned)
-    const result = await transactionService.updateTransactionDisplay(
-      ctx.api,
-      ctx.chat.id,
-      config.pendingTopicId,
-      repliedMsg,
-      updated,
-      snapshot,
-      updated.amount,
-      kb,
-    );
-
-    if ('error' in result) {
-      await ctx.reply(`❌ ${result.error}`, {
-        message_thread_id: msg.message_thread_id,
-      });
-      return;
-    }
-
-    // Delete the command message
-    try {
-      await ctx.deleteMessage();
-    } catch { /* ignore */ }
   });
 }
