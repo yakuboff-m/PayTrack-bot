@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS transactions (
   confirmation_url        TEXT,
   history_message_id      INTEGER,
   metadata_message_id     INTEGER,
+  notes                   TEXT DEFAULT '[]',
   created_at              TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE(telegram_chat_id, original_message_id),
   FOREIGN KEY (distributor_id) REFERENCES distributors(id) ON DELETE SET NULL
@@ -41,3 +42,15 @@ CREATE INDEX IF NOT EXISTS idx_transactions_pending_topic_id
   ON transactions(pending_topic_id);
 CREATE INDEX IF NOT EXISTS idx_transactions_payment_message_id
   ON transactions(payment_message_id);
+
+CREATE TABLE IF NOT EXISTS conversation_states (
+  key             TEXT PRIMARY KEY,
+  step            TEXT NOT NULL,
+  action          TEXT NOT NULL,
+  distributor_id  INTEGER,
+  data            TEXT NOT NULL DEFAULT '{}',
+  started_at      INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_conversation_states_started_at
+  ON conversation_states(started_at);

@@ -1,7 +1,7 @@
 import type { Api } from 'grammy';
 import type { InlineKeyboardMarkup, Message } from 'grammy/types';
 import { TransactionRepository } from './transaction.repository';
-import { getConfig } from '../config/config';
+import { getConfig, type Config } from '../config/config';
 import {
   buildMessageLink,
   detectMessageType,
@@ -14,23 +14,33 @@ import {
   formatConfirmedHeader,
   formatHistoryRecord,
   buildMetadataBlock,
+  formatInvoiceId,
   nowISO,
 } from '../bot/helpers/format.helpers';
+import { copyAccountKeyboard } from '../bot/keyboards/keyboards';
 import type {
   Transaction,
   TransactionRow,
   DistributorSnapshot,
   ConfirmationResult,
+  InvoiceNote,
 } from '../types';
 
 /**
- * In-memory lock set to prevent duplicate /confirmed processing.
+ * In-memory lock set to prevent duplicate /confirmed processing within the same isolate.
  * Keyed by transaction ID.
  */
 const processingLocks = new Set<number>();
 
 export class TransactionService {
-  constructor(private repo: TransactionRepository) {}
+  constructor(
+    private repo: TransactionRepository,
+    private config?: Config
+  ) {}
+
+  private getEffectiveConfig(): Config {
+    return this.config ?? getConfig();
+  }
 
   // ─── Row → Domain mapping ────────────────────────────────
 
@@ -54,49 +64,106 @@ export class TransactionService {
       confirmationUrl: row.confirmation_url,
       historyMessageId: row.history_message_id,
       metadataMessageId: row.metadata_message_id,
+      notes: row.notes ? JSON.parse(row.notes) : [],
       createdAt: row.created_at,
     };
   }
 
   // ─── Registration ─────────────────────────────────────────
 
-  registerTransaction(chatId: string, topicId: number, messageId: number): Transaction {
-    const row = this.repo.create(chatId, topicId, messageId, nowISO());
+  async registerTransaction(
+    chatId: string,
+    topicId: number,
+    messageId: number,
+    notes?: InvoiceNote[]
+  ): Promise<Transaction> {
+    const row = await this.repo.create(
+      chatId,
+      topicId,
+      messageId,
+      nowISO(),
+      notes && notes.length > 0 ? JSON.stringify(notes) : undefined
+    );
     return this.toDomain(row);
   }
 
-  findById(id: number): Transaction | undefined {
-    const row = this.repo.findById(id);
+  async restoreOrRegisterTransaction(params: {
+    id?: number | null;
+    chatId: string;
+    pendingTopicId: number;
+    messageId: number;
+    distributorSnapshot?: DistributorSnapshot | null;
+    amount?: number | null;
+    notes?: InvoiceNote[];
+  }): Promise<Transaction> {
+    const row = await this.repo.restoreOrRegister({
+      id: params.id ?? undefined,
+      chatId: params.chatId,
+      pendingTopicId: params.pendingTopicId,
+      messageId: params.messageId,
+      distributorSnapshot: params.distributorSnapshot ? JSON.stringify(params.distributorSnapshot) : null,
+      amount: params.amount ?? null,
+      receivedAt: nowISO(),
+      notes: params.notes && params.notes.length > 0 ? JSON.stringify(params.notes) : null,
+    });
+    return this.toDomain(row);
+  }
+
+  async findById(id: number): Promise<Transaction | undefined> {
+    const row = await this.repo.findById(id);
     return row ? this.toDomain(row) : undefined;
   }
 
-  findByMessageId(chatId: string, messageId: number): Transaction | undefined {
-    const row = this.repo.findByMessageId(chatId, messageId);
+  async findByMessageId(chatId: string, messageId: number): Promise<Transaction | undefined> {
+    const row = await this.repo.findByMessageId(chatId, messageId);
     return row ? this.toDomain(row) : undefined;
   }
 
   /** Finds a transaction by original or bot-resent message ID. */
-  findByAnyMessageId(chatId: string, messageId: number): Transaction | undefined {
-    const row = this.repo.findByAnyMessageId(chatId, messageId);
+  async findByAnyMessageId(chatId: string, messageId: number): Promise<Transaction | undefined> {
+    const row = await this.repo.findByAnyMessageId(chatId, messageId);
     return row ? this.toDomain(row) : undefined;
   }
 
   // ─── Distributor Assignment ───────────────────────────────
 
-  assignDistributor(
+  async assignDistributor(
     transactionId: number,
     distributorId: number,
     snapshot: DistributorSnapshot
-  ): Transaction {
-    this.repo.updateDistributor(transactionId, distributorId, JSON.stringify(snapshot));
-    return this.toDomain(this.repo.findById(transactionId)!);
+  ): Promise<Transaction> {
+    await this.repo.updateDistributor(transactionId, distributorId, JSON.stringify(snapshot));
+    const row = await this.repo.findById(transactionId);
+    return this.toDomain(row!);
   }
 
   // ─── Amount ───────────────────────────────────────────────
 
-  setAmount(transactionId: number, amount: number): Transaction {
-    this.repo.updateAmount(transactionId, amount);
-    return this.toDomain(this.repo.findById(transactionId)!);
+  async setAmount(transactionId: number, amount: number): Promise<Transaction> {
+    await this.repo.updateAmount(transactionId, amount);
+    const row = await this.repo.findById(transactionId);
+    return this.toDomain(row!);
+  }
+
+  // ─── Notes ────────────────────────────────────────────────
+
+  async updateNotes(transactionId: number, notes: InvoiceNote[]): Promise<Transaction> {
+    await this.repo.updateNotes(transactionId, JSON.stringify(notes));
+    const row = await this.repo.findById(transactionId);
+    return this.toDomain(row!);
+  }
+
+  async appendNote(transactionId: number, note: InvoiceNote): Promise<Transaction> {
+    const tx = await this.findById(transactionId);
+    if (!tx) {
+      throw new Error(`Transaction ${transactionId} not found`);
+    }
+    const updatedNotes = [...(tx.notes ?? []), note];
+    return this.updateNotes(transactionId, updatedNotes);
+  }
+
+  async updateMetadataMessageId(id: number, metadataMessageId: number): Promise<void> {
+    await this.repo.updateMetadataMessageId(id, metadataMessageId);
   }
 
   // ─── Bot Message Management ───────────────────────────────
@@ -124,8 +191,12 @@ export class TransactionService {
       distributor,
       amount,
       transaction.receivedAt,
-      transaction.id
+      transaction.id,
+      transaction.notes
     );
+
+    const msgType = detectMessageType(repliedMessage);
+    const maxLen = msgType === 'text' ? MAX_TEXT_LENGTH : MAX_CAPTION_LENGTH;
 
     // ── If the bot already owns the message, just edit it ────
     if (transaction.metadataMessageId) {
@@ -134,12 +205,21 @@ export class TransactionService {
         const currentText = repliedMessage.text ?? repliedMessage.caption ?? '';
         const { original } = splitOriginalAndMetadata(currentText);
 
-        const msgType = detectMessageType(repliedMessage);
         const newContent = original
           ? composeMessageText(original, metadataBlock)
           : metadataBlock;
-        const maxLen = msgType === 'text' ? MAX_TEXT_LENGTH : MAX_CAPTION_LENGTH;
-        const safeContent = newContent.length <= maxLen ? newContent : metadataBlock;
+
+        let safeContent: string;
+        if (newContent.length <= maxLen) {
+          safeContent = newContent;
+        } else {
+          const available = maxLen - metadataBlock.length - 2;
+          if (available > 10 && original) {
+            safeContent = composeMessageText(original.substring(0, available - 3) + '...', metadataBlock);
+          } else {
+            safeContent = metadataBlock.length <= maxLen ? metadataBlock : metadataBlock.substring(0, maxLen);
+          }
+        }
 
         if (msgType === 'text') {
           await api.editMessageText(chatId, transaction.metadataMessageId, safeContent, {
@@ -158,12 +238,23 @@ export class TransactionService {
       }
     }
 
-    // ── Bot doesn't own the message yet — re-send as bot ────
-    const msgType = detectMessageType(repliedMessage);
+    // ── Re-send as bot if direct edit failed or message is user-owned ────
     const originalCaption = repliedMessage.text ?? repliedMessage.caption ?? '';
     const caption = originalCaption
       ? composeMessageText(originalCaption, metadataBlock)
       : metadataBlock;
+
+    let safeCaption: string;
+    if (caption.length <= maxLen) {
+      safeCaption = caption;
+    } else {
+      const available = maxLen - metadataBlock.length - 2;
+      if (available > 10 && originalCaption) {
+        safeCaption = composeMessageText(originalCaption.substring(0, available - 3) + '...', metadataBlock);
+      } else {
+        safeCaption = metadataBlock.length <= maxLen ? metadataBlock : metadataBlock.substring(0, maxLen);
+      }
+    }
 
     let botMsg: Message;
     try {
@@ -172,8 +263,6 @@ export class TransactionService {
           // Get the highest-resolution photo
           const photos = repliedMessage.photo!;
           const fileId = photos[photos.length - 1].file_id;
-          const maxLen = MAX_CAPTION_LENGTH;
-          const safeCaption = caption.length <= maxLen ? caption : metadataBlock;
           botMsg = await api.sendPhoto(chatId, fileId, {
             caption: safeCaption,
             message_thread_id: topicId,
@@ -183,8 +272,6 @@ export class TransactionService {
         }
         case 'document': {
           const fileId = repliedMessage.document!.file_id;
-          const maxLen = MAX_CAPTION_LENGTH;
-          const safeCaption = caption.length <= maxLen ? caption : metadataBlock;
           botMsg = await api.sendDocument(chatId, fileId, {
             caption: safeCaption,
             message_thread_id: topicId,
@@ -194,7 +281,7 @@ export class TransactionService {
         }
         case 'text':
         default: {
-          botMsg = await api.sendMessage(chatId, caption, {
+          botMsg = await api.sendMessage(chatId, safeCaption, {
             message_thread_id: topicId,
             reply_markup: keyboard,
           });
@@ -214,9 +301,116 @@ export class TransactionService {
     }
 
     // Persist the bot message ID
-    this.repo.updateMetadataMessageId(transaction.id, botMsg.message_id);
+    await this.repo.updateMetadataMessageId(transaction.id, botMsg.message_id);
 
     return { botMessageId: botMsg.message_id };
+  }
+
+  /**
+   * Safely updates the display of an existing invoice when notes are added or updated.
+   * Handles text and caption editing, preserves original content, calculations, distributor info, and media.
+   * Works for both Pending and Confirmed invoices.
+   */
+  async updateInvoiceNotesDisplay(
+    api: Api,
+    chatId: number,
+    transaction: Transaction,
+    repliedMessage: Message
+  ): Promise<{ success: boolean; botMessageId?: number; error?: string }> {
+    try {
+      const config = this.getEffectiveConfig();
+
+      if (transaction.status === 'PAID') {
+        const distributorName = transaction.distributorSnapshot?.name ?? null;
+        const paidAt = transaction.paidAt ?? transaction.receivedAt;
+        const targetMessageId = repliedMessage.message_id;
+
+        // Replying to confirmation message in Confirmed topic
+        if (transaction.confirmationMessageId && targetMessageId === transaction.confirmationMessageId) {
+          const newHeader = formatConfirmedHeader(
+            distributorName,
+            transaction.amount,
+            transaction.receivedAt,
+            paidAt,
+            transaction.id,
+            undefined,
+            transaction.notes
+          );
+          if (repliedMessage.photo || repliedMessage.document) {
+            await api.editMessageCaption(chatId, targetMessageId, { caption: newHeader });
+          } else {
+            await api.editMessageText(chatId, targetMessageId, newHeader);
+          }
+          return { success: true, botMessageId: targetMessageId };
+        }
+
+        // Replying to history record in Pending topic
+        if (transaction.historyMessageId && targetMessageId === transaction.historyMessageId) {
+          const historyText = formatHistoryRecord(
+            distributorName,
+            transaction.amount,
+            transaction.receivedAt,
+            paidAt,
+            transaction.confirmationUrl ?? '',
+            transaction.id,
+            undefined,
+            transaction.notes
+          );
+          await api.editMessageText(chatId, targetMessageId, historyText);
+          return { success: true, botMessageId: targetMessageId };
+        }
+
+        // Fallback for confirmed transaction
+        if (transaction.confirmationMessageId) {
+          try {
+            const newHeader = formatConfirmedHeader(
+              distributorName,
+              transaction.amount,
+              transaction.receivedAt,
+              paidAt,
+              transaction.id,
+              undefined,
+              transaction.notes
+            );
+            if (repliedMessage.photo || repliedMessage.document) {
+              await api.editMessageCaption(chatId, transaction.confirmationMessageId, { caption: newHeader });
+            } else {
+              await api.editMessageText(chatId, transaction.confirmationMessageId, newHeader);
+            }
+          } catch {
+            // best effort
+          }
+        }
+        return { success: true };
+      }
+
+      // Invoice is PENDING:
+      let keyboard: InlineKeyboardMarkup | undefined;
+      if (transaction.distributorSnapshot?.accountNumber) {
+        keyboard = copyAccountKeyboard(transaction.distributorSnapshot.accountNumber);
+      } else if (repliedMessage.reply_markup) {
+        keyboard = repliedMessage.reply_markup as InlineKeyboardMarkup;
+      }
+
+      const result = await this.updateTransactionDisplay(
+        api,
+        chatId,
+        transaction.pendingTopicId ?? config.pendingTopicId,
+        repliedMessage,
+        transaction,
+        transaction.distributorSnapshot,
+        transaction.amount,
+        keyboard
+      );
+
+      if ('error' in result) {
+        return { success: false, error: result.error };
+      }
+      return { success: true, botMessageId: result.botMessageId };
+    } catch (err: unknown) {
+      console.error('Failed to update invoice notes display:', (err as Error).message);
+      return { success: false, error: (err as Error).message };
+    }
   }
 
   // ─── Confirmation Orchestration ───────────────────────────
@@ -226,8 +420,8 @@ export class TransactionService {
    * This is failure-safe/ordered: creative operations first, then DB commit,
    * then destructive cleanup. If any creative step fails, originals are preserved.
    *
-   * Uses an in-memory lock to prevent duplicate processing and re-checks
-   * the transaction status before the final DB commit.
+   * Uses an in-memory lock to prevent duplicate processing within the isolate,
+   * and an atomic database compare-and-swap for distributed safety.
    */
   async executeConfirmation(
     api: Api,
@@ -236,7 +430,7 @@ export class TransactionService {
     invoiceMsg?: Message,
     paymentEvidenceMsg?: Message
   ): Promise<ConfirmationResult> {
-    const config = getConfig();
+    const config = this.getEffectiveConfig();
     const chatId = config.telegramGroupId;
 
     // ── Acquire processing lock ──────────────────────────────
@@ -247,6 +441,9 @@ export class TransactionService {
       };
     }
     processingLocks.add(transaction.id);
+
+    let confirmedMsgId: number | undefined;
+    let historyMsgId: number | undefined;
 
     try {
       const paidAt = nowISO();
@@ -268,7 +465,8 @@ export class TransactionService {
         transaction.receivedAt,
         paidAt,
         transaction.id,
-        userNote
+        userNote,
+        transaction.notes
       );
 
       // Extract file IDs from invoice and payment media
@@ -281,8 +479,6 @@ export class TransactionService {
 
       const invoiceDoc = invoiceMsg?.document?.file_id ?? null;
       const paymentDoc = paymentEvidenceMsg?.document?.file_id ?? null;
-
-      let confirmedMsgId: number;
 
       try {
         if (invoicePhoto && paymentPhoto) {
@@ -367,7 +563,6 @@ export class TransactionService {
       // ── Phase 2: Record in Pending + DB ────────────────────
 
       // Create history record in Pending topic
-      let historyMsg: Message.TextMessage;
       try {
         const historyText = formatHistoryRecord(
           distributorName,
@@ -376,12 +571,18 @@ export class TransactionService {
           paidAt,
           confirmationUrl,
           transaction.id,
-          userNote
+          userNote,
+          transaction.notes
         );
-        historyMsg = await api.sendMessage(chatId, historyText, {
+        const historyMsg = await api.sendMessage(chatId, historyText, {
           message_thread_id: config.pendingTopicId,
         });
+        historyMsgId = historyMsg.message_id;
       } catch (err: unknown) {
+        // Rollback confirmed message if history record failed
+        if (confirmedMsgId) {
+          try { await api.deleteMessage(chatId, confirmedMsgId); } catch { /* best effort */ }
+        }
         return {
           success: false,
           error: `Failed to create history record: ${(err as Error).message}`,
@@ -389,17 +590,75 @@ export class TransactionService {
       }
 
       // Update DB — compare-and-swap
-      const committed = this.repo.markPaid(
-        transaction.id,
-        paidAt,
-        paymentEvidenceMsg?.message_id ?? commandMessageId,
-        confirmedMsgId,
-        confirmationUrl,
-        historyMsg.message_id
-      );
+      let committed = false;
+      try {
+        committed = await this.repo.markPaid(
+          transaction.id,
+          paidAt,
+          paymentEvidenceMsg?.message_id ?? commandMessageId,
+          confirmedMsgId,
+          confirmationUrl,
+          historyMsgId
+        );
+      } catch (dbErr: unknown) {
+        // A D1 error or network timeout occurred. Verify whether the database actually committed!
+        let verificationSucceeded = false;
+        try {
+          const verifyTx = await this.repo.findById(transaction.id);
+          verificationSucceeded = true;
+          if (
+            verifyTx &&
+            verifyTx.status === 'PAID' &&
+            verifyTx.confirmation_message_id === confirmedMsgId
+          ) {
+            // The write succeeded on the database before the network error/timeout!
+            // Do NOT delete the confirmation messages — treat as committed.
+            committed = true;
+          }
+        } catch (verifyErr: unknown) {
+          console.error(
+            `Verification query also failed after markPaid error for transaction ${transaction.id}:`,
+            (verifyErr as Error).message
+          );
+        }
+
+        if (committed) {
+          // Treated as committed — proceed to Phase 3 cleanup
+        } else if (!verificationSucceeded) {
+          // Both the write and the verification query failed!
+          // Commit status is UNCERTAIN. Do NOT delete confirmation messages
+          // to prevent accidentally deleting a successfully committed transaction.
+          console.error(
+            `Transaction ${transaction.id} commit status is uncertain. Preserving Telegram confirmation messages.`
+          );
+          return {
+            success: false,
+            error: `Database write and verification both failed. Commit status is uncertain; Telegram messages were preserved to prevent data loss. Original error: ${(dbErr as Error).message}`,
+          };
+        } else {
+          // Verification query succeeded and confirmed that the row was NOT committed with our confirmation message.
+          // It is safe to clean up our orphan messages.
+          if (historyMsgId) {
+            try { await api.deleteMessage(chatId, historyMsgId); } catch { /* best effort */ }
+          }
+          if (confirmedMsgId) {
+            try { await api.deleteMessage(chatId, confirmedMsgId); } catch { /* best effort */ }
+          }
+          return {
+            success: false,
+            error: `Database update failed: ${(dbErr as Error).message}`,
+          };
+        }
+      }
 
       if (!committed) {
-        try { await api.deleteMessage(chatId, historyMsg.message_id); } catch { /* best effort */ }
+        // Rollback BOTH history record and confirmed message on duplicate confirmation
+        if (historyMsgId) {
+          try { await api.deleteMessage(chatId, historyMsgId); } catch { /* best effort */ }
+        }
+        if (confirmedMsgId) {
+          try { await api.deleteMessage(chatId, confirmedMsgId); } catch { /* best effort */ }
+        }
         return {
           success: false,
           error: 'Transaction was already confirmed by another request.',
@@ -413,6 +672,33 @@ export class TransactionService {
         await api.deleteMessage(chatId, invoiceMessageId);
       } catch (err: unknown) {
         console.warn(`Failed to delete invoice message ${invoiceMessageId}:`, (err as Error).message);
+        // Fallback: If Telegram cannot delete the message (e.g. older than 48 hours),
+        // completely wipe off the caption/text, leave only "🔴 Should be deleted manually! 🔴",
+        // and remove the copy button.
+        try {
+          const manualNotice = '🔴 Should be deleted manually! 🔴';
+          const isMedia = invoiceMsg?.photo || invoiceMsg?.document || (!invoiceMsg && transaction.metadataMessageId);
+
+          if (isMedia || invoiceMsg?.caption !== undefined) {
+            await api.editMessageCaption(chatId, invoiceMessageId, {
+              caption: manualNotice,
+              reply_markup: { inline_keyboard: [] },
+            });
+          } else {
+            await api.editMessageText(chatId, invoiceMessageId, manualNotice, {
+              reply_markup: { inline_keyboard: [] },
+            });
+          }
+        } catch {
+          // If editing caption/text fails (e.g. user-owned message), at least remove the reply_markup (copy button)
+          try {
+            await api.editMessageReplyMarkup(chatId, invoiceMessageId, {
+              reply_markup: { inline_keyboard: [] },
+            });
+          } catch {
+            /* ignore */
+          }
+        }
       }
 
       // If bot re-sent and original still exists separately, delete original too
@@ -447,4 +733,3 @@ export class TransactionService {
     }
   }
 }
-

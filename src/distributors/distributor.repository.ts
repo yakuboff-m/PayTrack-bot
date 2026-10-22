@@ -1,43 +1,51 @@
 import { getDatabase } from '../database/database';
+import { IDatabase, SqliteDatabaseAdapter } from '../database/adapter';
 import type { DistributorRow, CreateDistributorInput, UpdateDistributorInput } from '../types';
 
 export class DistributorRepository {
-  private get db() {
-    return getDatabase();
+  private db: IDatabase;
+
+  constructor(db?: IDatabase) {
+    this.db = db ?? new SqliteDatabaseAdapter(getDatabase());
   }
 
-  create(input: CreateDistributorInput): DistributorRow {
-    const stmt = this.db.prepare(`
-      INSERT INTO distributors (name, alias, bank_name, account_number, account_holder)
-      VALUES (@name, @alias, @bankName, @accountNumber, @accountHolder)
-    `);
-    const result = stmt.run({
-      name: input.name,
-      alias: input.alias.toLowerCase(),
-      bankName: input.bankName,
-      accountNumber: input.accountNumber,
-      accountHolder: input.accountHolder,
-    });
-    return this.findById(result.lastInsertRowid as number)!;
+  async create(input: CreateDistributorInput): Promise<DistributorRow> {
+    const result = await this.db.exec(
+      `INSERT INTO distributors (name, alias, bank_name, account_number, account_holder)
+       VALUES (?, ?, ?, ?, ?)`,
+      [
+        input.name,
+        input.alias.toLowerCase(),
+        input.bankName,
+        input.accountNumber,
+        input.accountHolder,
+      ]
+    );
+    const created = await this.findById(result.lastInsertRowid as number);
+    if (!created) {
+      throw new Error('Failed to retrieve newly created distributor.');
+    }
+    return created;
   }
 
-  findAll(): DistributorRow[] {
-    const stmt = this.db.prepare('SELECT * FROM distributors ORDER BY name ASC');
-    return stmt.all() as DistributorRow[];
+  async findAll(): Promise<DistributorRow[]> {
+    return this.db.query<DistributorRow>('SELECT * FROM distributors ORDER BY name ASC');
   }
 
-  findById(id: number): DistributorRow | undefined {
-    const stmt = this.db.prepare('SELECT * FROM distributors WHERE id = ?');
-    return stmt.get(id) as DistributorRow | undefined;
+  async findById(id: number): Promise<DistributorRow | undefined> {
+    const row = await this.db.first<DistributorRow>('SELECT * FROM distributors WHERE id = ?', [id]);
+    return row ?? undefined;
   }
 
-  findByAlias(alias: string): DistributorRow | undefined {
-    const stmt = this.db.prepare('SELECT * FROM distributors WHERE alias = ?');
-    return stmt.get(alias.toLowerCase()) as DistributorRow | undefined;
+  async findByAlias(alias: string): Promise<DistributorRow | undefined> {
+    const row = await this.db.first<DistributorRow>('SELECT * FROM distributors WHERE alias = ?', [
+      alias.toLowerCase(),
+    ]);
+    return row ?? undefined;
   }
 
-  update(id: number, input: UpdateDistributorInput): DistributorRow | undefined {
-    const current = this.findById(id);
+  async update(id: number, input: UpdateDistributorInput): Promise<DistributorRow | undefined> {
+    const current = await this.findById(id);
     if (!current) return undefined;
 
     const updated = {
@@ -48,30 +56,35 @@ export class DistributorRepository {
       accountHolder: input.accountHolder ?? current.account_holder,
     };
 
-    const stmt = this.db.prepare(`
-      UPDATE distributors
-      SET name = @name,
-          alias = @alias,
-          bank_name = @bankName,
-          account_number = @accountNumber,
-          account_holder = @accountHolder,
-          updated_at = datetime('now')
-      WHERE id = @id
-    `);
-    stmt.run({ id, ...updated });
+    await this.db.exec(
+      `UPDATE distributors
+       SET name = ?,
+           alias = ?,
+           bank_name = ?,
+           account_number = ?,
+           account_holder = ?,
+           updated_at = datetime('now')
+       WHERE id = ?`,
+      [
+        updated.name,
+        updated.alias,
+        updated.bankName,
+        updated.accountNumber,
+        updated.accountHolder,
+        id,
+      ]
+    );
     return this.findById(id);
   }
 
-  delete(id: number): boolean {
-    const stmt = this.db.prepare('DELETE FROM distributors WHERE id = ?');
-    const result = stmt.run(id);
+  async delete(id: number): Promise<boolean> {
+    const result = await this.db.exec('DELETE FROM distributors WHERE id = ?', [id]);
     return result.changes > 0;
   }
 
   /** Returns all aliases for dynamic command matching */
-  getAllAliases(): string[] {
-    const stmt = this.db.prepare('SELECT alias FROM distributors ORDER BY alias ASC');
-    const rows = stmt.all() as Array<{ alias: string }>;
+  async getAllAliases(): Promise<string[]> {
+    const rows = await this.db.query<{ alias: string }>('SELECT alias FROM distributors ORDER BY alias ASC');
     return rows.map((r) => r.alias);
   }
 }

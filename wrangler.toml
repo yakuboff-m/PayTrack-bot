@@ -1,0 +1,8 @@
+name = "paytrack-bot"
+main = "src/worker.ts"
+compatibility_date = "2026-10-18"
+
+[[d1_databases]]
+binding = "paytrack_bot_db"
+database_name = "paytrack-bot-db"
+database_id = "293ba893-4741-44b6-ac05-972b3a054b80"

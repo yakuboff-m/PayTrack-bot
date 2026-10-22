@@ -27,52 +27,54 @@ export class DistributorService {
 
   // ─── CRUD ─────────────────────────────────────────────────
 
-  create(input: CreateDistributorInput): Distributor {
-    const existing = this.repo.findByAlias(input.alias);
+  async create(input: CreateDistributorInput): Promise<Distributor> {
+    const existing = await this.repo.findByAlias(input.alias);
     if (existing) {
       throw new Error(`Alias "/${input.alias}" is already in use by "${existing.name}".`);
     }
-    return this.toDomain(this.repo.create(input));
+    const row = await this.repo.create(input);
+    return this.toDomain(row);
   }
 
-  findAll(): Distributor[] {
-    return this.repo.findAll().map((r) => this.toDomain(r));
+  async findAll(): Promise<Distributor[]> {
+    const rows = await this.repo.findAll();
+    return rows.map((r) => this.toDomain(r));
   }
 
-  findById(id: number): Distributor | undefined {
-    const row = this.repo.findById(id);
+  async findById(id: number): Promise<Distributor | undefined> {
+    const row = await this.repo.findById(id);
     return row ? this.toDomain(row) : undefined;
   }
 
-  findByAlias(alias: string): Distributor | undefined {
-    const row = this.repo.findByAlias(alias);
+  async findByAlias(alias: string): Promise<Distributor | undefined> {
+    const row = await this.repo.findByAlias(alias);
     return row ? this.toDomain(row) : undefined;
   }
 
-  update(id: number, input: UpdateDistributorInput): Distributor {
+  async update(id: number, input: UpdateDistributorInput): Promise<Distributor> {
     // If alias is changing, check uniqueness
     if (input.alias) {
-      const existing = this.repo.findByAlias(input.alias);
+      const existing = await this.repo.findByAlias(input.alias);
       if (existing && existing.id !== id) {
         throw new Error(`Alias "/${input.alias}" is already in use by "${existing.name}".`);
       }
     }
-    const updated = this.repo.update(id, input);
+    const updated = await this.repo.update(id, input);
     if (!updated) {
       throw new Error(`Distributor with ID ${id} not found.`);
     }
     return this.toDomain(updated);
   }
 
-  delete(id: number): void {
-    const exists = this.repo.findById(id);
+  async delete(id: number): Promise<void> {
+    const exists = await this.repo.findById(id);
     if (!exists) {
       throw new Error(`Distributor with ID ${id} not found.`);
     }
-    this.repo.delete(id);
+    await this.repo.delete(id);
   }
 
-  getAllAliases(): string[] {
+  async getAllAliases(): Promise<string[]> {
     return this.repo.getAllAliases();
   }
 

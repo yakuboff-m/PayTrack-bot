@@ -23,7 +23,10 @@ export function registerHelpHandler(bot: Composer<Context>): void {
 
 *Distributor Management:*
 \`/distributors\` — List all distributors
-\`/add\\_distributor\` — Add a new distributor`;
+\`/add\\_distributor\` — Add a new distributor
+
+*Notes:*
+\`/note <text>\` — Attach a note to an invoice \\(reply to the invoice\\)`;
 
     await ctx.reply(helpText, { parse_mode: 'MarkdownV2' });
   });
