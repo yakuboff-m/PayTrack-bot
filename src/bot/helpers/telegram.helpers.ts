@@ -98,3 +98,134 @@ export function isReply(msg: Message): boolean {
 /** Telegram's maximum message text/caption length */
 export const MAX_TEXT_LENGTH = 4096;
 export const MAX_CAPTION_LENGTH = 1024;
+
+/** Notice appended to original Pending invoice messages when payment is confirmed */
+export const MANUAL_DELETION_NOTICE = '⚠️ Should be deleted manually!';
+
+export interface ManualDeletionNoticeResult {
+  text: string;
+  appended: boolean;
+  overflow: boolean;
+}
+
+/**
+ * Appends the manual deletion notice to an existing message text or caption.
+ * - Idempotent: If notice is already present, does not append it again.
+ * - Non-destructive: NEVER truncates original invoice content. If the content + notice
+ *   exceeds maxLen, keeps the original content intact and marks overflow: true so the
+ *   warning can be dispatched as a separate reply/message.
+ */
+export function appendManualDeletionNotice(
+  content: string,
+  maxLen: number = MAX_TEXT_LENGTH
+): ManualDeletionNoticeResult {
+  const trimmed = content.trim();
+  if (!trimmed) {
+    return {
+      text: MANUAL_DELETION_NOTICE,
+      appended: true,
+      overflow: false,
+    };
+  }
+
+  // Idempotence check: do not duplicate the notice
+  if (trimmed.includes(MANUAL_DELETION_NOTICE)) {
+    return {
+      text: trimmed,
+      appended: true,
+      overflow: false,
+    };
+  }
+
+  const combined = `${trimmed}\n\n${MANUAL_DELETION_NOTICE}`;
+  if (combined.length <= maxLen) {
+    return {
+      text: combined,
+      appended: true,
+      overflow: false,
+    };
+  }
+
+  // Insufficient room: NEVER truncate original invoice content!
+  // Return original content intact with overflow flag so caller can send warning separately.
+  return {
+    text: trimmed,
+    appended: false,
+    overflow: true,
+  };
+}
+
+/**
+ * Splits a text message cleanly into sequential chunks that strictly respect Telegram's MAX_TEXT_LENGTH (4096 code units).
+ * Attempts to break on paragraph boundaries (\n\n), then line breaks (\n), then spaces, avoiding slicing words.
+ */
+export function splitTextMessage(
+  text: string,
+  maxLen: number = MAX_TEXT_LENGTH
+): string[] {
+  if (text.length <= maxLen) {
+    return [text];
+  }
+
+  const chunks: string[] = [];
+  let remaining = text;
+
+  while (remaining.length > maxLen) {
+    let splitIdx = remaining.lastIndexOf('\n\n', maxLen);
+    if (splitIdx === -1 || splitIdx < Math.floor(maxLen / 2)) {
+      splitIdx = remaining.lastIndexOf('\n', maxLen);
+    }
+    if (splitIdx === -1 || splitIdx < Math.floor(maxLen / 2)) {
+      splitIdx = remaining.lastIndexOf(' ', maxLen);
+    }
+    if (splitIdx === -1 || splitIdx === 0) {
+      splitIdx = maxLen;
+    }
+
+    // Guard against splitting inside a UTF-16 surrogate pair
+    if (splitIdx > 0 && splitIdx < remaining.length) {
+      const code = remaining.charCodeAt(splitIdx - 1);
+      if (code >= 0xd800 && code <= 0xdbff) {
+        splitIdx--;
+      }
+    }
+
+    chunks.push(remaining.substring(0, splitIdx).trimEnd());
+    remaining = remaining.substring(splitIdx).trimStart();
+  }
+
+  if (remaining.length > 0) {
+    chunks.push(remaining);
+  }
+
+  return chunks;
+}
+
+/**
+ * Formats combined text for Confirmed topic by joining the PAID header with original invoice content.
+ */
+export function formatConfirmedInvoiceContent(
+  headerText: string,
+  originalContent?: string | null
+): string {
+  const trimmedOriginal = (originalContent ?? '').trim();
+  if (!trimmedOriginal) {
+    return headerText;
+  }
+  return `${headerText}\n\n${trimmedOriginal}`;
+}
+
+/**
+ * Classifies whether a Telegram API error reliably indicates that the message
+ * lacks editable text (i.e. it is a media message such as a photo or document).
+ * Telegram Bot API returns "Bad Request: there is no text in the message to edit".
+ */
+export function isNoTextMessageError(err: unknown): boolean {
+  if (!err) return false;
+  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+  return (
+    msg.includes('there is no text in the message to edit') ||
+    msg.includes('message to edit has no text') ||
+    msg.includes('no text in the message')
+  );
+}

@@ -122,4 +122,7 @@ export interface ConfirmationResult {
   success: boolean;
   confirmationUrl?: string;
   error?: string;
+  confirmedMessageId?: number;
+  pendingReceiptMessageId?: number;
+  historyMessageId?: number;
 }

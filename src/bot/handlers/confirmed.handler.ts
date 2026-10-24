@@ -114,7 +114,7 @@ export function registerConfirmedHandler(
         if (parentTx) {
           transaction = parentTx;
           invoiceMsg = parentRepliedMsg;
-          if (!paymentEvidenceMsg && ((repliedMsg.photo && repliedMsg.photo.length > 0) || repliedMsg.document)) {
+          if (!paymentEvidenceMsg && repliedMsg) {
             paymentEvidenceMsg = repliedMsg;
           }
         }
@@ -169,7 +169,7 @@ export function registerConfirmedHandler(
           }
           if (transaction) {
             invoiceMsg = parentRepliedMsg;
-            if (!paymentEvidenceMsg && ((repliedMsg.photo && repliedMsg.photo.length > 0) || repliedMsg.document)) {
+            if (!paymentEvidenceMsg && repliedMsg) {
               paymentEvidenceMsg = repliedMsg;
             }
           }

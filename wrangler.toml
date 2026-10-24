@@ -2,7 +2,14 @@ name = "paytrack-bot"
 main = "src/worker.ts"
 compatibility_date = "2026-10-18"
 
+[vars]
+TELEGRAM_GROUP_ID = "-1004463761895"
+TELEGRAM_PENDING_TOPIC_ID = "2"
+TELEGRAM_CONFIRMED_TOPIC_ID = "12"
+TELEGRAM_ADMIN_USER_IDS = "1823403862"
+
 [[d1_databases]]
 binding = "paytrack_bot_db"
 database_name = "paytrack-bot-db"
 database_id = "293ba893-4741-44b6-ac05-972b3a054b80"
+migrations_dir = "src/database/migrations"
