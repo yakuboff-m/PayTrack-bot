@@ -82,6 +82,12 @@ export class TransactionService {
     messageId: number,
     notes?: InvoiceNote[]
   ): Promise<Transaction> {
+    if (
+      messageId === topicId ||
+      (this.config && (messageId === this.config.pendingTopicId || messageId === this.config.confirmedTopicId))
+    ) {
+      throw new Error(`Cannot register topic creation message ${messageId} as a transaction.`);
+    }
     const row = await this.repo.create(
       chatId,
       topicId,
@@ -101,6 +107,12 @@ export class TransactionService {
     amount?: number | null;
     notes?: InvoiceNote[];
   }): Promise<Transaction> {
+    if (
+      params.messageId === params.pendingTopicId ||
+      (this.config && (params.messageId === this.config.pendingTopicId || params.messageId === this.config.confirmedTopicId))
+    ) {
+      throw new Error(`Cannot restore or register topic creation message ${params.messageId} as a transaction.`);
+    }
     const row = await this.repo.restoreOrRegister({
       id: params.id ?? undefined,
       chatId: params.chatId,
@@ -120,12 +132,24 @@ export class TransactionService {
   }
 
   async findByMessageId(chatId: string, messageId: number): Promise<Transaction | undefined> {
+    if (
+      this.config &&
+      (messageId === this.config.pendingTopicId || messageId === this.config.confirmedTopicId)
+    ) {
+      return undefined;
+    }
     const row = await this.repo.findByMessageId(chatId, messageId);
     return row ? this.toDomain(row) : undefined;
   }
 
   /** Finds a transaction by original or bot-resent message ID. */
   async findByAnyMessageId(chatId: string, messageId: number): Promise<Transaction | undefined> {
+    if (
+      this.config &&
+      (messageId === this.config.pendingTopicId || messageId === this.config.confirmedTopicId)
+    ) {
+      return undefined;
+    }
     const row = await this.repo.findByAnyMessageId(chatId, messageId);
     return row ? this.toDomain(row) : undefined;
   }

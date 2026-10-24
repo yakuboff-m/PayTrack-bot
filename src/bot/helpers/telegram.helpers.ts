@@ -89,11 +89,54 @@ export function composeMessageText(originalText: string, metadataBlock: string):
 }
 
 /**
- * Checks if a message is a reply to another message (has reply_to_message).
+ * Checks if a message is a forum topic action/service message (e.g. topic creation message).
+ */
+export function isTopicServiceMessage(msg: Message): boolean {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const anyMsg = msg as any;
+  return Boolean(
+    anyMsg.forum_topic_created !== undefined ||
+    anyMsg.forum_topic_edited !== undefined ||
+    anyMsg.forum_topic_closed !== undefined ||
+    anyMsg.forum_topic_reopened !== undefined ||
+    anyMsg.general_forum_topic_hidden !== undefined ||
+    anyMsg.general_forum_topic_unhidden !== undefined
+  );
+}
+
+/**
+ * Returns the genuine replied message targeted by the user.
+ * In Telegram supergroups with forum topics enabled, Telegram automatically populates
+ * `reply_to_message` with the topic creation message (where message_id === message_thread_id
+ * or forum_topic_created is present) when a user posts directly into a topic thread without
+ * replying to any message.
+ * This helper filters out such container/service messages so handlers never treat the topic
+ * root as an invoice or transaction message.
+ */
+export function getEffectiveRepliedMessage(msg: Message): Message | undefined {
+  const replied = msg.reply_to_message;
+  if (!replied) return undefined;
+
+  // If the replied message is the topic creation message itself, it is not a genuine reply
+  if (msg.message_thread_id !== undefined && replied.message_id === msg.message_thread_id) {
+    return undefined;
+  }
+
+  // If the replied message is a forum topic action/service message
+  if (isTopicServiceMessage(replied)) {
+    return undefined;
+  }
+
+  return replied;
+}
+
+/**
+ * Checks if a message is a genuine reply to another user message (not a topic container).
  */
 export function isReply(msg: Message): boolean {
-  return msg.reply_to_message !== undefined;
+  return getEffectiveRepliedMessage(msg) !== undefined;
 }
+
 
 /** Telegram's maximum message text/caption length */
 export const MAX_TEXT_LENGTH = 4096;

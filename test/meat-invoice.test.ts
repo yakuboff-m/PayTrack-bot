@@ -464,5 +464,190 @@ describe('Plain-Text Meat Invoice Calculator', () => {
       const rows = await txRepo.findByMessageId(String(testConfig.telegramGroupId), 301);
       assert.ok(rows);
     });
+
+    it('standalone /ikhlas message with no reply_to_message must not produce already-confirmed error', async () => {
+      const { bot, txRepo, distService, sentMessages } = await setupTestContext();
+
+      // Create distributor with alias 'ikhlas'
+      await distService.create({
+        name: 'Ikhlas Market',
+        alias: 'ikhlas',
+        bankName: 'Woori Bank',
+        accountNumber: '1005-704-764624',
+        accountHolder: 'IKHLAS MARKET',
+      });
+
+      // Existing transaction in DB is already PAID
+      await txRepo.create(
+        String(testConfig.telegramGroupId),
+        testConfig.pendingTopicId,
+        testConfig.pendingTopicId,
+        new Date().toISOString()
+      );
+      const existing = await txRepo.findByMessageId(String(testConfig.telegramGroupId), testConfig.pendingTopicId);
+      if (existing) {
+        await txRepo.markPaid(existing.id, new Date().toISOString(), 99, 100, 'https://t.me/c/123/100');
+      }
+
+      // User sends standalone /ikhlas with no reply_to_message
+      const update = {
+        update_id: 11,
+        message: {
+          message_id: 401,
+          from: { id: 111, is_bot: false, first_name: 'Admin' },
+          chat: { id: testConfig.telegramGroupId, type: 'supergroup' },
+          message_thread_id: testConfig.pendingTopicId,
+          date: Math.floor(Date.now() / 1000),
+          text: '/ikhlas',
+        },
+      };
+
+      await bot.handleUpdate(update as any);
+
+      assert.equal(sentMessages.length, 1);
+      assert.doesNotMatch(sentMessages[0].text, /already been confirmed/);
+      assert.match(sentMessages[0].text, /Reply to a transaction message with \/ikhlas/);
+    });
+
+    it('standalone /ikhlas message inside forum topic where Telegram attaches topic creation message must not produce already-confirmed error', async () => {
+      const { bot, txRepo, distService, sentMessages } = await setupTestContext();
+
+      // Create distributor with alias 'ikhlas'
+      await distService.create({
+        name: 'Ikhlas Market',
+        alias: 'ikhlas',
+        bankName: 'Woori Bank',
+        accountNumber: '1005-704-764624',
+        accountHolder: 'IKHLAS MARKET',
+      });
+
+      // In D1, an already confirmed/paid transaction exists matching topic creation message ID (reproducing remote D1 row 2)
+      await txRepo.create(
+        String(testConfig.telegramGroupId),
+        testConfig.pendingTopicId,
+        testConfig.pendingTopicId,
+        new Date().toISOString()
+      );
+      const existing = await txRepo.findByMessageId(String(testConfig.telegramGroupId), testConfig.pendingTopicId);
+      assert.ok(existing);
+      await txRepo.markPaid(existing.id, new Date().toISOString(), 99, 100, 'https://t.me/c/123/100');
+
+      // User sends /ikhlas in Pending forum topic without intending to reply, but Telegram attaches topic root
+      const update = {
+        update_id: 12,
+        message: {
+          message_id: 402,
+          from: { id: 111, is_bot: false, first_name: 'Admin' },
+          chat: { id: testConfig.telegramGroupId, type: 'supergroup' },
+          message_thread_id: testConfig.pendingTopicId,
+          is_topic_message: true,
+          date: Math.floor(Date.now() / 1000),
+          text: '/ikhlas',
+          reply_to_message: {
+            message_id: testConfig.pendingTopicId,
+            chat: { id: testConfig.telegramGroupId, type: 'supergroup' },
+            forum_topic_created: {
+              name: 'Pending',
+              icon_color: 7322096,
+            },
+          },
+        },
+      };
+
+      await bot.handleUpdate(update as any);
+
+      // Must not falsely claim that the new command is already confirmed
+      assert.equal(sentMessages.length, 1);
+      assert.doesNotMatch(sentMessages[0].text, /already been confirmed/);
+      assert.match(sentMessages[0].text, /Reply to a transaction message with \/ikhlas/);
+    });
+
+    it('direct meat invoice with /ikhlas in forum topic succeeds even when reply_to_message points to topic creation message', async () => {
+      const { bot, txRepo, distService, sentMessages } = await setupTestContext();
+
+      const dist = await distService.create({
+        name: 'Ikhlas Market',
+        alias: 'ikhlas',
+        bankName: 'Woori Bank',
+        accountNumber: '1005-704-764624',
+        accountHolder: 'IKHLAS MARKET',
+      });
+
+      const meatLines = [
+        '/ikhlas',
+        'Qozon 10 x 12.5',
+      ].join('\n');
+
+      const update = {
+        update_id: 13,
+        message: {
+          message_id: 403,
+          from: { id: 111, is_bot: false, first_name: 'Admin' },
+          chat: { id: testConfig.telegramGroupId, type: 'supergroup' },
+          message_thread_id: testConfig.pendingTopicId,
+          is_topic_message: true,
+          date: Math.floor(Date.now() / 1000),
+          text: meatLines,
+          reply_to_message: {
+            message_id: testConfig.pendingTopicId,
+            chat: { id: testConfig.telegramGroupId, type: 'supergroup' },
+            forum_topic_created: { name: 'Pending' },
+          },
+        },
+      };
+
+      await bot.handleUpdate(update as any);
+
+      // Successfully registered direct meat invoice
+      const tx = await txRepo.findByMessageId(String(testConfig.telegramGroupId), 403);
+      assert.ok(tx);
+      assert.equal(tx.status, 'PENDING');
+      assert.equal(tx.distributor_id, dist.id);
+      assert.equal(tx.amount, 125000);
+      assert.equal(sentMessages.length, 1);
+      assert.match(sentMessages[0].text, /Ikhlas Market/);
+      assert.match(sentMessages[0].text, /₩125,000/);
+    });
+
+    it('standalone /amount in forum topic does not produce already-confirmed error', async () => {
+      const { bot, txRepo, sentMessages } = await setupTestContext();
+
+      // In D1, an already confirmed/paid transaction exists matching topic creation message ID
+      await txRepo.create(
+        String(testConfig.telegramGroupId),
+        testConfig.pendingTopicId,
+        testConfig.pendingTopicId,
+        new Date().toISOString()
+      );
+      const existing = await txRepo.findByMessageId(String(testConfig.telegramGroupId), testConfig.pendingTopicId);
+      assert.ok(existing);
+      await txRepo.markPaid(existing.id, new Date().toISOString(), 99, 100, 'https://t.me/c/123/100');
+
+      // User sends /amount 280700 in forum topic without explicit reply (Telegram attaches topic root)
+      const update = {
+        update_id: 14,
+        message: {
+          message_id: 404,
+          from: { id: 111, is_bot: false, first_name: 'Admin' },
+          chat: { id: testConfig.telegramGroupId, type: 'supergroup' },
+          message_thread_id: testConfig.pendingTopicId,
+          is_topic_message: true,
+          date: Math.floor(Date.now() / 1000),
+          text: '/amount 280,700',
+          entities: [{ type: 'bot_command', offset: 0, length: 7 }],
+          reply_to_message: {
+            message_id: testConfig.pendingTopicId,
+            chat: { id: testConfig.telegramGroupId, type: 'supergroup' },
+            forum_topic_created: { name: 'Pending' },
+          },
+        },
+      };
+
+      await bot.handleUpdate(update as any);
+
+      assert.equal(sentMessages.length, 1);
+      assert.doesNotMatch(sentMessages[0].text, /already been confirmed/);
+      assert.match(sentMessages[0].text, /Reply to a transaction message with the amount/);
+    });
   });
 });

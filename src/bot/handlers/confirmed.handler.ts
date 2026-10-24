@@ -9,6 +9,7 @@ import {
   extractInvoiceIdFromText,
   parseInvoiceMetadataFromText,
 } from '../helpers/format.helpers';
+import { getEffectiveRepliedMessage } from '../helpers/telegram.helpers';
 
 /**
  * Checks if a message represents the /paid (or /confirmed) command.
@@ -60,12 +61,12 @@ export function registerConfirmedHandler(
     // If not a /paid command, check if user uploaded receipt media as a reply without /paid
     // so we can give them an informative auto-deleting hint
     if (!isPaid) {
-      if (msg.reply_to_message && ((msg.photo && msg.photo.length > 0) || msg.document)) {
+      const repliedMediaMsg = getEffectiveRepliedMessage(msg);
+      if (repliedMediaMsg && ((msg.photo && msg.photo.length > 0) || msg.document)) {
         const senderId = ctx.from?.id;
         if (senderId && config.adminUserIds.includes(senderId)) {
           const chatId = String(ctx.chat.id);
-          const repliedMsg = msg.reply_to_message;
-          const targetTx = await transactionService.findByAnyMessageId(chatId, repliedMsg.message_id);
+          const targetTx = await transactionService.findByAnyMessageId(chatId, repliedMediaMsg.message_id);
           if (targetTx && targetTx.status === 'PENDING') {
             try {
               const hint = await ctx.reply(
@@ -97,7 +98,7 @@ export function registerConfirmedHandler(
     const explicitId = parseInvoiceId(commandArg);
 
     const chatId = String(ctx.chat.id);
-    const repliedMsg = msg.reply_to_message;
+    const repliedMsg = getEffectiveRepliedMessage(msg);
 
     let transaction: Transaction | undefined;
     let invoiceMsg: Message | undefined;
@@ -108,7 +109,7 @@ export function registerConfirmedHandler(
       transaction = await transactionService.findByAnyMessageId(chatId, repliedMsg.message_id);
       invoiceMsg = repliedMsg;
 
-      const parentRepliedMsg = (repliedMsg as unknown as { reply_to_message?: Message }).reply_to_message;
+      const parentRepliedMsg = getEffectiveRepliedMessage(repliedMsg);
       if (!transaction && parentRepliedMsg) {
         const parentTx = await transactionService.findByAnyMessageId(chatId, parentRepliedMsg.message_id);
         if (parentTx) {

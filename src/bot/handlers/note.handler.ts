@@ -3,7 +3,7 @@ import type { Message } from 'grammy/types';
 import { getConfig, type Config } from '../../config/config';
 import { TransactionService } from '../../transactions/transaction.service';
 import { requireAdmin } from '../middleware/auth.middleware';
-import { isReply } from '../helpers/telegram.helpers';
+import { isReply, getEffectiveRepliedMessage } from '../helpers/telegram.helpers';
 import { nowISO } from '../helpers/format.helpers';
 import type { InvoiceNote } from '../../types';
 
@@ -34,8 +34,10 @@ export function registerNoteHandler(
       const text = (msg.text ?? msg.caption ?? '').trim();
       const rawNote = text.replace(/^\/note(?:@\w+)?\s*/i, '').trim();
 
+      const repliedMsg = getEffectiveRepliedMessage(msg);
+
       // 1. Validate reply: must reply to an existing invoice message
-      if (!isReply(msg) || !msg.reply_to_message) {
+      if (!repliedMsg) {
         await ctx.reply(
           'ℹ️ Usage: Reply to an invoice message with `/note <your note>` to attach a note.',
           {
@@ -70,7 +72,6 @@ export function registerNoteHandler(
       }
 
       const chatId = String(ctx.chat.id);
-      const repliedMsg = msg.reply_to_message;
 
       // 4. Resolve the target invoice using message-to-invoice mapping
       const transaction = await transactionService.findByAnyMessageId(chatId, repliedMsg.message_id);

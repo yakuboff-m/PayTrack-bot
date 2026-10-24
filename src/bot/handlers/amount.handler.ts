@@ -5,6 +5,7 @@ import { requireAdmin } from '../middleware/auth.middleware';
 import { getConfig, type Config } from '../../config/config';
 import { parseAmount } from '../helpers/format.helpers';
 import { copyAccountKeyboard } from '../keyboards/keyboards';
+import { getEffectiveRepliedMessage } from '../helpers/telegram.helpers';
 
 export function registerAmountHandler(
   bot: Composer<Context>,
@@ -19,9 +20,10 @@ export function registerAmountHandler(
     if (!msg) return;
 
     const threadId = msg.message_thread_id ?? config.pendingTopicId;
+    const repliedMsg = getEffectiveRepliedMessage(msg);
 
     // Must be a reply to a transaction message
-    if (!msg.reply_to_message) {
+    if (!repliedMsg) {
       await ctx.reply(
         '❌ Reply to a transaction message with the amount.\n\nExample:\n/amount 280,700',
         { message_thread_id: threadId },
@@ -46,7 +48,6 @@ export function registerAmountHandler(
       return;
     }
 
-    const repliedMsg = msg.reply_to_message;
     const chatId = String(ctx.chat.id);
 
     // Find transaction (check both original and bot message IDs)

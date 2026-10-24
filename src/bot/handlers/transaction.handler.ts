@@ -10,6 +10,7 @@ import {
   isFromBot,
   isCommand,
   isReply,
+  getEffectiveRepliedMessage,
   METADATA_SEPARATOR,
 } from '../helpers/telegram.helpers';
 import {
@@ -135,6 +136,8 @@ export function registerTransactionHandler(
       let effectivePayload = payload;
       const initialNotes: InvoiceNote[] = [];
 
+      const repliedMsg = getEffectiveRepliedMessage(msg);
+
       if (payload) {
         const { cleanText, note: payloadNote } = extractNoteFromText(payload);
         if (payloadNote) {
@@ -167,10 +170,10 @@ export function registerTransactionHandler(
           }
           meatInvoice = parsed.invoice;
         }
-      } else if (msg.reply_to_message) {
+      } else if (repliedMsg) {
         // No payload on command, but user replied to a message
         // Check if replied message text contains meat invoice lines
-        const repliedText = msg.reply_to_message.text ?? msg.reply_to_message.caption ?? '';
+        const repliedText = repliedMsg.text ?? repliedMsg.caption ?? '';
         if (
           repliedText &&
           /[xX×\*]/.test(repliedText) &&
@@ -184,7 +187,7 @@ export function registerTransactionHandler(
       }
 
       // ─── Case 1: Meat invoice provided directly (not a reply) ───
-      if (meatInvoice && !msg.reply_to_message) {
+      if (meatInvoice && !repliedMsg) {
         // Prevent accidental duplicate registration if Telegram retried
         const existingTx = await transactionService.findByMessageId(chatId, msg.message_id);
         if (existingTx) {
@@ -237,15 +240,13 @@ export function registerTransactionHandler(
       }
 
       // ─── Case 2: Must be a reply to an existing transaction ─────
-      if (!msg.reply_to_message) {
+      if (!repliedMsg) {
         await ctx.reply(
           `❌ Reply to a transaction message with /${alias} to assign this distributor.`,
           { message_thread_id: threadId }
         );
         return;
       }
-
-      const repliedMsg = msg.reply_to_message;
 
       // Find transaction (check both original and bot message IDs)
       let transaction = await transactionService.findByAnyMessageId(chatId, repliedMsg.message_id);
