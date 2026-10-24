@@ -7,8 +7,13 @@ import {
   detectMessageType,
   splitOriginalAndMetadata,
   composeMessageText,
+  appendManualDeletionNotice,
+  formatConfirmedInvoiceContent,
+  splitTextMessage,
+  MANUAL_DELETION_NOTICE,
   MAX_CAPTION_LENGTH,
   MAX_TEXT_LENGTH,
+  isNoTextMessageError,
 } from '../bot/helpers/telegram.helpers';
 import {
   formatConfirmedHeader,
@@ -433,6 +438,16 @@ export class TransactionService {
     const config = this.getEffectiveConfig();
     const chatId = config.telegramGroupId;
 
+    // ── Check if already confirmed ───────────────────────────
+    if (transaction.status === 'PAID') {
+      return {
+        success: false,
+        error: 'Transaction was already confirmed.',
+        confirmedMessageId: transaction.confirmationMessageId ?? undefined,
+        historyMessageId: transaction.historyMessageId ?? undefined,
+      };
+    }
+
     // ── Acquire processing lock ──────────────────────────────
     if (processingLocks.has(transaction.id)) {
       return {
@@ -443,7 +458,25 @@ export class TransactionService {
     processingLocks.add(transaction.id);
 
     let confirmedMsgId: number | undefined;
+    const additionalConfirmedMsgIds: number[] = [];
+    let pendingReceiptMsgId: number | undefined;
     let historyMsgId: number | undefined;
+
+    // Helper for rolling back all created messages
+    const rollbackAllCreatedMessages = async () => {
+      if (historyMsgId) {
+        try { await api.deleteMessage(chatId, historyMsgId); } catch { /* best effort */ }
+      }
+      if (pendingReceiptMsgId) {
+        try { await api.deleteMessage(chatId, pendingReceiptMsgId); } catch { /* best effort */ }
+      }
+      for (const id of additionalConfirmedMsgIds) {
+        try { await api.deleteMessage(chatId, id); } catch { /* best effort */ }
+      }
+      if (confirmedMsgId) {
+        try { await api.deleteMessage(chatId, confirmedMsgId); } catch { /* best effort */ }
+      }
+    };
 
     try {
       const paidAt = nowISO();
@@ -469,6 +502,14 @@ export class TransactionService {
         transaction.notes
       );
 
+      // Extract original invoice content (preserving item breakdown, text, or captions)
+      const invoiceRawText = invoiceMsg?.text ?? invoiceMsg?.caption ?? '';
+      const { original: extractedOriginal } = splitOriginalAndMetadata(invoiceRawText);
+      const originalInvoiceContent = extractedOriginal.trim() || invoiceRawText.trim();
+
+      // Combined text for Confirmed topic: PAID header + blank line + original invoice content
+      const combinedConfirmedText = formatConfirmedInvoiceContent(headerText, originalInvoiceContent);
+
       // Extract file IDs from invoice and payment media
       const invoicePhoto = (invoiceMsg?.photo && invoiceMsg.photo.length > 0)
         ? invoiceMsg.photo[invoiceMsg.photo.length - 1].file_id
@@ -482,76 +523,152 @@ export class TransactionService {
 
       try {
         if (invoicePhoto && paymentPhoto) {
-          // Both are photos: send TOGETHER as ONE media group (album) with the single caption!
+          // Both are photos: send TOGETHER as ONE media group (album)
+          const caption = combinedConfirmedText.length <= MAX_CAPTION_LENGTH
+            ? combinedConfirmedText
+            : headerText;
           const album = await api.sendMediaGroup(
             chatId,
             [
               {
                 type: 'photo',
                 media: invoicePhoto,
-                caption: headerText,
+                caption,
               },
               {
                 type: 'photo',
                 media: paymentPhoto,
+                caption: paymentEvidenceMsg?.caption || undefined,
               },
             ],
             { message_thread_id: config.confirmedTopicId }
           );
           confirmedMsgId = album[0].message_id;
+          if (album[1]) {
+            additionalConfirmedMsgIds.push(album[1].message_id);
+          }
+
+          // If combined text exceeded caption length, send remaining invoice content as follow-up text message(s)
+          if (combinedConfirmedText.length > MAX_CAPTION_LENGTH && originalInvoiceContent) {
+            const chunks = splitTextMessage(originalInvoiceContent, MAX_TEXT_LENGTH);
+            for (const chunk of chunks) {
+              const followUp = await api.sendMessage(chatId, chunk, {
+                message_thread_id: config.confirmedTopicId,
+              });
+              additionalConfirmedMsgIds.push(followUp.message_id);
+            }
+          }
         } else if (invoiceDoc && paymentDoc) {
-          // Both are documents: send TOGETHER as ONE media group with the single caption!
+          // Both are documents: send TOGETHER as ONE media group
+          const caption = combinedConfirmedText.length <= MAX_CAPTION_LENGTH
+            ? combinedConfirmedText
+            : headerText;
           const album = await api.sendMediaGroup(
             chatId,
             [
               {
                 type: 'document',
                 media: invoiceDoc,
-                caption: headerText,
+                caption,
               },
               {
                 type: 'document',
                 media: paymentDoc,
+                caption: paymentEvidenceMsg?.caption || undefined,
               },
             ],
             { message_thread_id: config.confirmedTopicId }
           );
           confirmedMsgId = album[0].message_id;
-        } else if (invoiceMsg && detectMessageType(invoiceMsg) === 'text') {
-          // Text invoice
-          const sent = await api.sendMessage(chatId, headerText, {
+          if (album[1]) {
+            additionalConfirmedMsgIds.push(album[1].message_id);
+          }
+
+          if (combinedConfirmedText.length > MAX_CAPTION_LENGTH && originalInvoiceContent) {
+            const chunks = splitTextMessage(originalInvoiceContent, MAX_TEXT_LENGTH);
+            for (const chunk of chunks) {
+              const followUp = await api.sendMessage(chatId, chunk, {
+                message_thread_id: config.confirmedTopicId,
+              });
+              additionalConfirmedMsgIds.push(followUp.message_id);
+            }
+          }
+        } else if (!invoicePhoto && !invoiceDoc) {
+          // Plain text invoice: split cleanly if over MAX_TEXT_LENGTH without dropping content
+          const chunks = splitTextMessage(combinedConfirmedText, MAX_TEXT_LENGTH);
+          const sent = await api.sendMessage(chatId, chunks[0], {
             message_thread_id: config.confirmedTopicId,
           });
           confirmedMsgId = sent.message_id;
-          if (paymentPhoto) {
-            try {
-              await api.copyMessage(chatId, chatId, paymentEvidenceMsg!.message_id, {
+
+          for (const chunk of chunks.slice(1)) {
+            const followUp = await api.sendMessage(chatId, chunk, {
+              message_thread_id: config.confirmedTopicId,
+            });
+            additionalConfirmedMsgIds.push(followUp.message_id);
+          }
+
+          // If there is payment evidence (photo, doc, or text receipt), copy it into Confirmed
+          if (paymentEvidenceMsg && paymentEvidenceMsg.message_id !== invoiceMessageId) {
+            if (paymentPhoto || paymentDoc) {
+              const receiptCaption = userNote
+                ? `🧾 Payment Receipt: ${userNote}`
+                : '🧾 Payment Receipt';
+              const copied = await api.copyMessage(chatId, chatId, paymentEvidenceMsg.message_id, {
                 message_thread_id: config.confirmedTopicId,
-                caption: userNote ? `🧾 Payment Receipt: ${userNote}` : '🧾 Payment Receipt',
+                caption: receiptCaption,
               });
-            } catch { /* best effort */ }
+              additionalConfirmedMsgIds.push(copied.message_id);
+            } else {
+              const copied = await api.copyMessage(chatId, chatId, paymentEvidenceMsg.message_id, {
+                message_thread_id: config.confirmedTopicId,
+              });
+              additionalConfirmedMsgIds.push(copied.message_id);
+            }
           }
         } else {
-          // Single media (no separate payment photo, or mixed formats)
+          // Single media invoice (photo/doc invoice without matched media payment group)
+          const caption = combinedConfirmedText.length <= MAX_CAPTION_LENGTH
+            ? combinedConfirmedText
+            : headerText;
           const copied = await api.copyMessage(chatId, chatId, invoiceMessageId, {
             message_thread_id: config.confirmedTopicId,
-            caption: headerText,
+            caption,
           });
           confirmedMsgId = copied.message_id;
 
-          // If there is a payment document that couldn't be grouped with a photo
-          if (paymentEvidenceMsg && paymentEvidenceMsg.message_id !== invoiceMessageId && paymentDoc) {
-            try {
-              await api.copyMessage(chatId, chatId, paymentEvidenceMsg.message_id, {
+          // If caption length limit prevented appending original invoice caption, send full content as follow-up text
+          if (combinedConfirmedText.length > MAX_CAPTION_LENGTH && originalInvoiceContent) {
+            const chunks = splitTextMessage(originalInvoiceContent, MAX_TEXT_LENGTH);
+            for (const chunk of chunks) {
+              const followUp = await api.sendMessage(chatId, chunk, {
                 message_thread_id: config.confirmedTopicId,
-                caption: userNote ? `🧾 Payment Receipt: ${userNote}` : '🧾 Payment Receipt',
               });
-            } catch (err: unknown) {
-              console.warn(`Failed to copy payment doc: ${(err as Error).message}`);
+              additionalConfirmedMsgIds.push(followUp.message_id);
+            }
+          }
+
+          // If there is payment evidence (photo, doc, or text receipt) that could not be grouped, copy it to Confirmed
+          if (paymentEvidenceMsg && paymentEvidenceMsg.message_id !== invoiceMessageId) {
+            if (paymentPhoto || paymentDoc) {
+              const receiptCaption = userNote
+                ? `🧾 Payment Receipt: ${userNote}`
+                : '🧾 Payment Receipt';
+              const copiedEvidence = await api.copyMessage(chatId, chatId, paymentEvidenceMsg.message_id, {
+                message_thread_id: config.confirmedTopicId,
+                caption: receiptCaption,
+              });
+              additionalConfirmedMsgIds.push(copiedEvidence.message_id);
+            } else {
+              const copiedEvidence = await api.copyMessage(chatId, chatId, paymentEvidenceMsg.message_id, {
+                message_thread_id: config.confirmedTopicId,
+              });
+              additionalConfirmedMsgIds.push(copiedEvidence.message_id);
             }
           }
         }
       } catch (err: unknown) {
+        await rollbackAllCreatedMessages();
         return {
           success: false,
           error: `Failed to create confirmation in Confirmed topic: ${(err as Error).message}`,
@@ -562,7 +679,23 @@ export class TransactionService {
 
       // ── Phase 2: Record in Pending + DB ────────────────────
 
-      // Create history record in Pending topic
+      // 1. Copy payment evidence into Pending topic (photos, docs, text receipts)
+      if (paymentEvidenceMsg && paymentEvidenceMsg.message_id !== invoiceMessageId) {
+        try {
+          const copied = await api.copyMessage(chatId, chatId, paymentEvidenceMsg.message_id, {
+            message_thread_id: config.pendingTopicId,
+          });
+          pendingReceiptMsgId = copied.message_id;
+        } catch (err: unknown) {
+          await rollbackAllCreatedMessages();
+          return {
+            success: false,
+            error: `Failed to copy payment evidence to Pending: ${(err as Error).message}`,
+          };
+        }
+      }
+
+      // 2. Create history record in Pending topic
       try {
         const historyText = formatHistoryRecord(
           distributorName,
@@ -579,17 +712,14 @@ export class TransactionService {
         });
         historyMsgId = historyMsg.message_id;
       } catch (err: unknown) {
-        // Rollback confirmed message if history record failed
-        if (confirmedMsgId) {
-          try { await api.deleteMessage(chatId, confirmedMsgId); } catch { /* best effort */ }
-        }
+        await rollbackAllCreatedMessages();
         return {
           success: false,
           error: `Failed to create history record: ${(err as Error).message}`,
         };
       }
 
-      // Update DB — compare-and-swap
+      // 3. Update DB — compare-and-swap
       let committed = false;
       try {
         committed = await this.repo.markPaid(
@@ -612,7 +742,6 @@ export class TransactionService {
             verifyTx.confirmation_message_id === confirmedMsgId
           ) {
             // The write succeeded on the database before the network error/timeout!
-            // Do NOT delete the confirmation messages — treat as committed.
             committed = true;
           }
         } catch (verifyErr: unknown) {
@@ -625,9 +754,7 @@ export class TransactionService {
         if (committed) {
           // Treated as committed — proceed to Phase 3 cleanup
         } else if (!verificationSucceeded) {
-          // Both the write and the verification query failed!
-          // Commit status is UNCERTAIN. Do NOT delete confirmation messages
-          // to prevent accidentally deleting a successfully committed transaction.
+          // Both the write and the verification query failed! Commit status is UNCERTAIN.
           console.error(
             `Transaction ${transaction.id} commit status is uncertain. Preserving Telegram confirmation messages.`
           );
@@ -636,14 +763,8 @@ export class TransactionService {
             error: `Database write and verification both failed. Commit status is uncertain; Telegram messages were preserved to prevent data loss. Original error: ${(dbErr as Error).message}`,
           };
         } else {
-          // Verification query succeeded and confirmed that the row was NOT committed with our confirmation message.
-          // It is safe to clean up our orphan messages.
-          if (historyMsgId) {
-            try { await api.deleteMessage(chatId, historyMsgId); } catch { /* best effort */ }
-          }
-          if (confirmedMsgId) {
-            try { await api.deleteMessage(chatId, confirmedMsgId); } catch { /* best effort */ }
-          }
+          // Verification query confirmed row was NOT committed. Clean up orphan messages.
+          await rollbackAllCreatedMessages();
           return {
             success: false,
             error: `Database update failed: ${(dbErr as Error).message}`,
@@ -652,81 +773,138 @@ export class TransactionService {
       }
 
       if (!committed) {
-        // Rollback BOTH history record and confirmed message on duplicate confirmation
-        if (historyMsgId) {
-          try { await api.deleteMessage(chatId, historyMsgId); } catch { /* best effort */ }
-        }
-        if (confirmedMsgId) {
-          try { await api.deleteMessage(chatId, confirmedMsgId); } catch { /* best effort */ }
-        }
+        await rollbackAllCreatedMessages();
         return {
           success: false,
           error: 'Transaction was already confirmed by another request.',
         };
       }
 
-      // ── Phase 3: Cleanup (destructive — only after Phase 1+2 succeed) ─
-
-      // Delete the bot's invoice message from Pending (or user's original if no bot msg)
+      // ── Phase 3: Retain & edit original Pending invoice message ─
+      // NEVER delete the invoice message or payment evidence automatically.
       try {
-        await api.deleteMessage(chatId, invoiceMessageId);
-      } catch (err: unknown) {
-        console.warn(`Failed to delete invoice message ${invoiceMessageId}:`, (err as Error).message);
-        // Fallback: If Telegram cannot delete the message (e.g. older than 48 hours),
-        // completely wipe off the caption/text, leave only "🔴 Should be deleted manually! 🔴",
-        // and remove the copy button.
-        try {
-          const manualNotice = '🔴 Should be deleted manually! 🔴';
-          const isMedia = invoiceMsg?.photo || invoiceMsg?.document || (!invoiceMsg && transaction.metadataMessageId);
+        if (invoiceMsg) {
+          const msgType = detectMessageType(invoiceMsg);
+          const isMedia = msgType === 'photo' || msgType === 'document' || invoiceMsg.caption !== undefined;
+          const currentContent = invoiceMsg.text ?? invoiceMsg.caption ?? '';
+          const maxLen = isMedia ? MAX_CAPTION_LENGTH : MAX_TEXT_LENGTH;
+          const noticeResult = appendManualDeletionNotice(currentContent, maxLen);
 
-          if (isMedia || invoiceMsg?.caption !== undefined) {
-            await api.editMessageCaption(chatId, invoiceMessageId, {
-              caption: manualNotice,
-              reply_markup: { inline_keyboard: [] },
-            });
+          if (noticeResult.overflow) {
+            // Insufficient room: keep original caption/text intact, remove keyboard
+            try {
+              await api.editMessageReplyMarkup(chatId, invoiceMessageId, {
+                reply_markup: { inline_keyboard: [] },
+              });
+            } catch {
+              /* best effort */
+            }
+            // Send warning as a separate reply/message
+            try {
+              await api.sendMessage(chatId, MANUAL_DELETION_NOTICE, {
+                message_thread_id: config.pendingTopicId,
+                reply_parameters: { message_id: invoiceMessageId },
+              });
+            } catch (noticeErr: unknown) {
+              console.warn(`Failed to send separate warning message: ${(noticeErr as Error).message}`);
+            }
           } else {
-            await api.editMessageText(chatId, invoiceMessageId, manualNotice, {
-              reply_markup: { inline_keyboard: [] },
-            });
+            // Fits (or notice already present)
+            let editSucceeded = false;
+            if (isMedia) {
+              try {
+                await api.editMessageCaption(chatId, invoiceMessageId, {
+                  caption: noticeResult.text,
+                  reply_markup: { inline_keyboard: [] },
+                });
+                editSucceeded = true;
+              } catch (editErr: unknown) {
+                console.warn(`Failed to edit pending invoice caption ${invoiceMessageId}:`, (editErr as Error).message);
+              }
+            } else {
+              try {
+                await api.editMessageText(chatId, invoiceMessageId, noticeResult.text, {
+                  reply_markup: { inline_keyboard: [] },
+                });
+                editSucceeded = true;
+              } catch (textErr: unknown) {
+                // Classify error: only fall back to editMessageCaption if the error reliably
+                // indicates absence of editable text (genuine media message)
+                if (isNoTextMessageError(textErr)) {
+                  try {
+                    await api.editMessageCaption(chatId, invoiceMessageId, {
+                      caption: noticeResult.text,
+                      reply_markup: { inline_keyboard: [] },
+                    });
+                    editSucceeded = true;
+                  } catch (captionErr: unknown) {
+                    console.warn(`Failed to edit pending invoice caption fallback ${invoiceMessageId}:`, (captionErr as Error).message);
+                  }
+                } else {
+                  // For network errors, rate limits, server errors, permission failures, or uneditable messages:
+                  // Avoid an unnecessary second edit attempt!
+                  console.warn(`Failed to edit pending invoice text ${invoiceMessageId} with non-media error, skipping caption edit:`, (textErr as Error).message);
+                }
+              }
+            }
+
+            if (!editSucceeded) {
+              // Attempt to remove inline keyboard while keeping original content intact
+              try {
+                await api.editMessageReplyMarkup(chatId, invoiceMessageId, {
+                  reply_markup: { inline_keyboard: [] },
+                });
+              } catch {
+                /* best effort */
+              }
+              console.warn(`Warning could not be added to original invoice message ${invoiceMessageId}`);
+            }
           }
-        } catch {
-          // If editing caption/text fails (e.g. user-owned message), at least remove the reply_markup (copy button)
+        } else {
+          // invoiceMsg was not provided (explicit /paid #INV0001 without reply).
+          // Original content cannot be retrieved. NEVER replace the original invoice with only the deletion notice!
+          // Preserve the original message, remove its inline keyboard where possible, and send the warning separately.
           try {
             await api.editMessageReplyMarkup(chatId, invoiceMessageId, {
               reply_markup: { inline_keyboard: [] },
             });
-          } catch {
-            /* ignore */
+          } catch (markupErr: unknown) {
+            console.warn(`Could not remove inline keyboard for invoice ${invoiceMessageId}:`, (markupErr as Error).message);
+          }
+
+          try {
+            await api.sendMessage(chatId, MANUAL_DELETION_NOTICE, {
+              message_thread_id: config.pendingTopicId,
+              reply_parameters: { message_id: invoiceMessageId },
+            });
+          } catch (sendErr: unknown) {
+            console.warn(`Could not send separate deletion warning for invoice ${invoiceMessageId}:`, (sendErr as Error).message);
           }
         }
-      }
-
-      // If bot re-sent and original still exists separately, delete original too
-      if (transaction.metadataMessageId && transaction.metadataMessageId !== transaction.originalMessageId) {
-        try {
-          await api.deleteMessage(chatId, transaction.originalMessageId);
-        } catch { /* may already be deleted during re-send */ }
-      }
-
-      // Delete payment evidence message from Pending if separate from command message
-      if (paymentEvidenceMsg && paymentEvidenceMsg.message_id !== commandMessageId) {
-        try {
-          await api.deleteMessage(chatId, paymentEvidenceMsg.message_id);
-        } catch (err: unknown) {
-          console.warn(`Failed to delete payment evidence message: ${(err as Error).message}`);
-        }
-      }
-
-      // Delete payment command message (/confirmed) from Pending
-      try {
-        await api.deleteMessage(chatId, commandMessageId);
       } catch (err: unknown) {
-        console.warn(`Failed to delete command message ${commandMessageId}:`, (err as Error).message);
+        console.warn(`Phase 3 warning handling error for message ${invoiceMessageId}:`, (err as Error).message);
+      }
+
+      // Delete pure payment command message (/paid) from Pending only if it contains no receipt or note
+      if (
+        commandMessageId &&
+        (!paymentEvidenceMsg || commandMessageId !== paymentEvidenceMsg.message_id) &&
+        commandMessageId !== invoiceMessageId &&
+        !userNote
+      ) {
+        try {
+          await api.deleteMessage(chatId, commandMessageId);
+        } catch (err: unknown) {
+          console.warn(`Failed to delete command message ${commandMessageId}:`, (err as Error).message);
+        }
       }
 
       return {
         success: true,
         confirmationUrl,
+        confirmedMessageId: confirmedMsgId,
+        pendingReceiptMessageId: pendingReceiptMsgId,
+        historyMessageId: historyMsgId,
       };
     } finally {
       processingLocks.delete(transaction.id);

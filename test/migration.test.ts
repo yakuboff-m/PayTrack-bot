@@ -1,3 +1,5 @@
+/// <reference types="@cloudflare/workers-types" />
+
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
@@ -143,6 +145,9 @@ describe('Migration Verification Test Suite', () => {
         sendMediaGroup: async () => [{ message_id: 8888 }],
         sendMessage: async () => ({ message_id: 9999 }),
         copyMessage: async () => ({ message_id: 8888 }),
+        editMessageText: async () => ({}),
+        editMessageCaption: async () => ({}),
+        editMessageReplyMarkup: async () => ({}),
         deleteMessage: async (_chatId: any, msgId: number) => {
           deletedMessageIds.push(msgId);
         },
@@ -177,6 +182,7 @@ describe('Migration Verification Test Suite', () => {
         confirmationUrl: null,
         historyMessageId: null,
         metadataMessageId: null,
+        notes: [],
         createdAt: new Date().toISOString(),
       };
 
@@ -206,6 +212,9 @@ describe('Migration Verification Test Suite', () => {
           return { message_id: options?.message_thread_id === testConfig.confirmedTopicId ? 8888 : 9999 };
         },
         copyMessage: async () => ({ message_id: 8888 }),
+        editMessageText: async () => ({}),
+        editMessageCaption: async () => ({}),
+        editMessageReplyMarkup: async () => ({}),
         deleteMessage: async (_chatId: any, msgId: number) => {
           deletedMessageIds.push(msgId);
         },
@@ -242,6 +251,7 @@ describe('Migration Verification Test Suite', () => {
         confirmationUrl: null,
         historyMessageId: null,
         metadataMessageId: null,
+        notes: [],
         createdAt: new Date().toISOString(),
       };
 
