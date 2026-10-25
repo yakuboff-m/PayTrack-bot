@@ -40,11 +40,12 @@ export class TransactionRepository {
   }): Promise<TransactionRow> {
     if (params.id) {
       await this.db.exec(
-        `INSERT INTO transactions (id, telegram_chat_id, pending_topic_id, original_message_id, metadata_message_id, distributor_snapshot, amount, received_at, notes)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO transactions (id, telegram_chat_id, pending_topic_id, original_message_id, metadata_message_id, distributor_snapshot, initial_amount, amount, received_at, notes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            metadata_message_id = COALESCE(metadata_message_id, excluded.metadata_message_id),
            distributor_snapshot = COALESCE(distributor_snapshot, excluded.distributor_snapshot),
+           initial_amount = COALESCE(initial_amount, excluded.initial_amount),
            amount = COALESCE(amount, excluded.amount)`,
         [
           params.id,
@@ -53,6 +54,7 @@ export class TransactionRepository {
           params.messageId,
           params.messageId,
           params.distributorSnapshot ?? null,
+          params.amount ?? null,
           params.amount ?? null,
           params.receivedAt,
           params.notes ?? null,
@@ -163,7 +165,10 @@ export class TransactionRepository {
   }
 
   async updateAmount(id: number, amount: number): Promise<void> {
-    await this.db.exec('UPDATE transactions SET amount = ? WHERE id = ?', [amount, id]);
+    await this.db.exec(
+      'UPDATE transactions SET amount = ?, initial_amount = COALESCE(initial_amount, ?) WHERE id = ?',
+      [amount, amount, id]
+    );
   }
 
   /**
@@ -242,17 +247,21 @@ export class TransactionRepository {
     paymentMessageId: number | null,
     confirmedMessageId: number | null,
     historyMessageId: number | null,
-    note?: string | null
+    note?: string | null,
+    receiptMessageId?: number | null,
+    receiptUrl?: string | null
   ): Promise<PaymentRow> {
     const result = await this.db.exec(
-      `INSERT INTO payments (transaction_id, amount, paid_at, payment_message_id, confirmed_message_id, history_message_id, note)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO payments (transaction_id, amount, paid_at, payment_message_id, confirmed_message_id, receipt_message_id, receipt_url, history_message_id, note)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         transactionId,
         amount,
         paidAt,
         paymentMessageId ?? null,
         confirmedMessageId ?? null,
+        receiptMessageId ?? null,
+        receiptUrl ?? null,
         historyMessageId ?? null,
         note ?? null,
       ]

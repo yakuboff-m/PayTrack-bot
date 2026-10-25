@@ -201,9 +201,9 @@ describe('/add Workflow Regression Suite', () => {
     // Assert caption breakdown on first photo of media group
     const caption = mg.media[0].caption;
     assert.ok(caption);
-    assert.match(caption, /📥 Initial: ₩240,000/);
-    assert.match(caption, /➕ Added: ₩230,000/);
-    assert.match(caption, /💰 Grand Total: ₩470,000/);
+    assert.match(caption, /Registered Amount: ₩240,000/);
+    assert.match(caption, /Amount Added: ₩230,000/);
+    assert.match(caption, /Updated Invoice Total: ₩470,000/);
 
     // Assert follow-up copy account keyboard message sent
     const keyboardMsg = ctx.sentMessages.find(
@@ -280,7 +280,7 @@ describe('/add Workflow Regression Suite', () => {
     assert.equal(mg.media[0].media, 'doc_initial_1');
     assert.equal(mg.media[1].type, 'document');
     assert.equal(mg.media[1].media, 'doc_add_2');
-    assert.match(mg.media[0].caption, /Grand Total: ₩150,000/);
+    assert.match(mg.media[0].caption, /Updated Invoice Total: ₩150,000/);
 
     assert.ok(ctx.deletedMessageIds.includes(602));
   });
@@ -324,7 +324,7 @@ describe('/add Workflow Regression Suite', () => {
       (m) => m.document === 'doc_supplementary' || m.document?.file_id === 'doc_supplementary'
     );
     assert.ok(sentDoc, 'Must send updated document');
-    assert.match(sentDoc.caption, /Grand Total: ₩180,000/);
+    assert.match(sentDoc.caption, /Updated Invoice Total: ₩180,000/);
 
     // Original invoice edited and admin message deleted
     assert.ok(ctx.editedCaptions.find((e) => e.message_id === 503));
@@ -435,8 +435,8 @@ describe('/add Workflow Regression Suite', () => {
     const mg = ctx.sentMediaGroups[0];
     assert.ok(mg);
     const caption = mg.media[0].caption;
-    assert.match(caption, /💰 Grand Total: ₩350,000/);
-    assert.match(caption, /💵 Paid: ₩100,000/);
+    assert.match(caption, /Updated Invoice Total: ₩350,000/);
+    assert.match(caption, /Total Paid: ₩100,000/);
     assert.match(caption, /⚖️ Balance Due: ₩250,000/);
   });
 

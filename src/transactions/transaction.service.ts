@@ -17,6 +17,9 @@ import {
   formatConfirmedHeader,
   formatHistoryRecord,
   buildMetadataBlock,
+  buildUnifiedInvoiceCaption,
+  computeInvoiceFinancialSummary,
+  stripDuplicateTotalLines,
   formatInvoiceId,
   formatCleanedPendingInvoiceCaption,
   formatSupersededInvoiceCaption,
@@ -92,6 +95,7 @@ export class TransactionService {
       distributorSnapshot: row.distributor_snapshot
         ? JSON.parse(row.distributor_snapshot)
         : null,
+      initialAmount: row.initial_amount ?? null,
       amount: row.amount,
       currency: row.currency,
       status: row.status as Transaction['status'],
@@ -231,6 +235,67 @@ export class TransactionService {
   // ─── Bot Message Management ───────────────────────────────
 
   /**
+   * Authoritative invoice caption builder that fetches durable event history
+   * (registration, additions, payments with receipt URLs) from the database
+   * and formats a consistent, append-only invoice caption.
+   */
+  async renderInvoiceCaptionForTransaction(
+    transactionId: number,
+    rawContent?: string,
+    maxLen: number = MAX_CAPTION_LENGTH
+  ): Promise<string> {
+    const tx = await this.findById(transactionId);
+    if (!tx) {
+      return '';
+    }
+
+    const additions = await this.repo.getAdditions(tx.id);
+    const payments = await this.repo.getPayments(tx.id);
+
+    const additionsList = additions.map((a) => ({
+      amount: a.amount,
+      addedAt: a.added_at,
+      note: a.note,
+    }));
+
+    const paymentsList = payments.map((p) => ({
+      amount: p.amount,
+      paidAt: p.paid_at,
+      note: p.note,
+      receiptUrl: p.receipt_url,
+    }));
+
+    const totalAdditions = additionsList.reduce((sum, a) => sum + a.amount, 0);
+    const initialAmount =
+      tx.initialAmount ??
+      (tx.amount !== null ? Math.max(0, tx.amount - totalAdditions) : null);
+
+    let cleanItems = '';
+    let isMeat = false;
+    if (rawContent) {
+      const { original } = splitOriginalAndMetadata(rawContent);
+      cleanItems = stripDuplicateTotalLines(original);
+      if (/MEAT INVOICE/i.test(rawContent)) {
+        isMeat = true;
+      }
+    }
+
+    return buildUnifiedInvoiceCaption({
+      invoiceId: tx.id,
+      title: isMeat ? '🥩 MEAT INVOICE' : '🧾 INVOICE',
+      distributor: tx.distributorSnapshot,
+      itemsBreakdown: cleanItems,
+      receivedAt: tx.receivedAt,
+      initialAmount,
+      currentAmount: tx.amount,
+      additions: additionsList,
+      payments: paymentsList,
+      notes: tx.notes,
+      maxCaptionLength: maxLen,
+    });
+  }
+
+  /**
    * Re-sends the user's invoice as a bot-owned message with metadata caption
    * and inline keyboard, then deletes the user's original.
    *
@@ -249,47 +314,34 @@ export class TransactionService {
     amount: number | null,
     keyboard?: InlineKeyboardMarkup
   ): Promise<{ botMessageId: number } | { error: string }> {
-    const metadataBlock = buildMetadataBlock(
-      distributor,
-      amount,
-      transaction.receivedAt,
-      transaction.id,
-      transaction.notes
-    );
-
     const msgType = detectMessageType(repliedMessage);
     const maxLen = msgType === 'text' ? MAX_TEXT_LENGTH : MAX_CAPTION_LENGTH;
+    const currentText = repliedMessage.text ?? repliedMessage.caption ?? '';
+
+    if (amount !== null && transaction.amount !== amount) {
+      await this.setAmount(transaction.id, amount);
+      transaction.amount = amount;
+    }
+    if (distributor && !transaction.distributorSnapshot) {
+      transaction.distributorSnapshot = distributor;
+    }
+
+    const safeCaption = await this.renderInvoiceCaptionForTransaction(
+      transaction.id,
+      currentText,
+      maxLen
+    );
 
     // ── If the bot already owns the message, just edit it ────
     if (transaction.metadataMessageId) {
       try {
-        // Get the current caption/text to preserve the original content
-        const currentText = repliedMessage.text ?? repliedMessage.caption ?? '';
-        const { original } = splitOriginalAndMetadata(currentText);
-
-        const newContent = original
-          ? composeMessageText(original, metadataBlock)
-          : metadataBlock;
-
-        let safeContent: string;
-        if (newContent.length <= maxLen) {
-          safeContent = newContent;
-        } else {
-          const available = maxLen - metadataBlock.length - 2;
-          if (available > 10 && original) {
-            safeContent = composeMessageText(original.substring(0, available - 3) + '...', metadataBlock);
-          } else {
-            safeContent = metadataBlock.length <= maxLen ? metadataBlock : metadataBlock.substring(0, maxLen);
-          }
-        }
-
         if (msgType === 'text') {
-          await api.editMessageText(chatId, transaction.metadataMessageId, safeContent, {
+          await api.editMessageText(chatId, transaction.metadataMessageId, safeCaption, {
             reply_markup: keyboard,
           });
         } else {
           await api.editMessageCaption(chatId, transaction.metadataMessageId, {
-            caption: safeContent,
+            caption: safeCaption,
             reply_markup: keyboard,
           });
         }
@@ -301,23 +353,6 @@ export class TransactionService {
     }
 
     // ── Re-send as bot if direct edit failed or message is user-owned ────
-    const originalCaption = repliedMessage.text ?? repliedMessage.caption ?? '';
-    const caption = originalCaption
-      ? composeMessageText(originalCaption, metadataBlock)
-      : metadataBlock;
-
-    let safeCaption: string;
-    if (caption.length <= maxLen) {
-      safeCaption = caption;
-    } else {
-      const available = maxLen - metadataBlock.length - 2;
-      if (available > 10 && originalCaption) {
-        safeCaption = composeMessageText(originalCaption.substring(0, available - 3) + '...', metadataBlock);
-      } else {
-        safeCaption = metadataBlock.length <= maxLen ? metadataBlock : metadataBlock.substring(0, maxLen);
-      }
-    }
-
     let botMsg: Message;
     try {
       switch (msgType) {
@@ -663,6 +698,7 @@ export class TransactionService {
       const invoiceDoc = invoiceMsg?.document?.file_id ?? null;
       const paymentDoc = paymentEvidenceMsg?.document?.file_id ?? null;
 
+      let effectiveReceiptMsgId: number | null = null;
       try {
         if (invoicePhoto && paymentPhoto) {
           // Both are photos: send TOGETHER as ONE media group (album)
@@ -689,6 +725,7 @@ export class TransactionService {
           confirmedMsgId = album[0].message_id;
           if (album[1]) {
             additionalConfirmedMsgIds.push(album[1].message_id);
+            effectiveReceiptMsgId = album[1].message_id;
           }
 
           if (combinedConfirmedText.length > MAX_CAPTION_LENGTH && originalInvoiceContent) {
@@ -725,6 +762,7 @@ export class TransactionService {
           confirmedMsgId = album[0].message_id;
           if (album[1]) {
             additionalConfirmedMsgIds.push(album[1].message_id);
+            effectiveReceiptMsgId = album[1].message_id;
           }
 
           if (combinedConfirmedText.length > MAX_CAPTION_LENGTH && originalInvoiceContent) {
@@ -762,11 +800,13 @@ export class TransactionService {
                 caption: receiptCaption,
               });
               additionalConfirmedMsgIds.push(copied.message_id);
+              effectiveReceiptMsgId = copied.message_id;
             } else {
               const copied = await api.copyMessage(chatId, chatId, paymentEvidenceMsg.message_id, {
                 message_thread_id: config.confirmedTopicId,
               });
               additionalConfirmedMsgIds.push(copied.message_id);
+              effectiveReceiptMsgId = copied.message_id;
             }
           }
         } else {
@@ -806,6 +846,7 @@ export class TransactionService {
                 }
               );
               additionalConfirmedMsgIds.push(copiedEvidence.message_id);
+              effectiveReceiptMsgId = copiedEvidence.message_id;
             } else {
               const copiedEvidence = await api.copyMessage(
                 chatId,
@@ -816,6 +857,7 @@ export class TransactionService {
                 }
               );
               additionalConfirmedMsgIds.push(copiedEvidence.message_id);
+              effectiveReceiptMsgId = copiedEvidence.message_id;
             }
           }
         }
@@ -827,7 +869,14 @@ export class TransactionService {
         };
       }
 
+      if (!effectiveReceiptMsgId) {
+        effectiveReceiptMsgId = confirmedMsgId;
+      }
+
       const confirmationUrl = buildMessageLink(chatId, confirmedMsgId);
+      const receiptUrl = effectiveReceiptMsgId
+        ? buildMessageLink(chatId, effectiveReceiptMsgId)
+        : confirmationUrl;
 
       // ── Phase 2: Record Payment in DB ────────────────────
       if (typeof this.repo.recordPayment === 'function') {
@@ -838,7 +887,9 @@ export class TransactionService {
           paymentMsgId,
           confirmedMsgId,
           null,
-          effectiveNote
+          effectiveNote,
+          effectiveReceiptMsgId,
+          receiptUrl
         );
       }
 
@@ -985,26 +1036,17 @@ export class TransactionService {
               ? copyAccountKeyboard(transaction.distributorSnapshot.accountNumber)
               : undefined;
 
-            const progressMetadata = buildMetadataBlock(
-              transaction.distributorSnapshot,
-              transaction.amount,
-              transaction.receivedAt,
+            const currentCaption = invoiceMsg.text ?? invoiceMsg.caption ?? '';
+            const newContent = await this.renderInvoiceCaptionForTransaction(
               transaction.id,
-              transaction.notes,
-              { cumulativePaid, remainingBalance }
+              currentCaption,
+              isMedia ? MAX_CAPTION_LENGTH : MAX_TEXT_LENGTH
             );
-
-            const originalCaption = invoiceMsg.text ?? invoiceMsg.caption ?? '';
-            const { original } = splitOriginalAndMetadata(originalCaption);
-            const newContent = original
-              ? composeMessageText(original, progressMetadata)
-              : progressMetadata;
 
             if (isMedia) {
               try {
                 await api.editMessageCaption(chatId, invoiceMessageId, {
-                  caption:
-                    newContent.length <= MAX_CAPTION_LENGTH ? newContent : progressMetadata,
+                  caption: newContent,
                   reply_markup: keyboard,
                 });
               } catch (editErr: unknown) {
@@ -1018,7 +1060,7 @@ export class TransactionService {
                 await api.editMessageText(
                   chatId,
                   invoiceMessageId,
-                  newContent.length <= MAX_TEXT_LENGTH ? newContent : progressMetadata,
+                  newContent,
                   {
                     reply_markup: keyboard,
                   }
@@ -1190,22 +1232,29 @@ export class TransactionService {
     try {
       // 2. Fetch history and calculate totals
       const previousAdditions = await this.repo.getAdditions(transaction.id);
+      const previousPayments = await this.repo.getPayments(transaction.id);
       const totalPreviousAdditions = previousAdditions.reduce((sum, a) => sum + a.amount, 0);
-      const initialAmount = (transaction.amount ?? 0) - totalPreviousAdditions;
+      const initialAmount =
+        transaction.initialAmount ??
+        (transaction.amount !== null ? Math.max(0, transaction.amount - totalPreviousAdditions) : 0);
       const newTotalAmount = (transaction.amount ?? 0) + addedAmount;
       const now = nowISO();
 
       const additionsList = [
-        ...previousAdditions.map((a) => ({ amount: a.amount, addedAt: a.added_at })),
-        { amount: addedAmount, addedAt: now },
+        ...previousAdditions.map((a) => ({
+          amount: a.amount,
+          addedAt: a.added_at,
+          note: a.note,
+        })),
+        { amount: addedAmount, addedAt: now, note: optionalNote },
       ];
 
-      let paymentProgress: { cumulativePaid: number; remainingBalance: number } | undefined;
-      if (transaction.status === 'PARTIALLY_PAID') {
-        const cumulativePaid = await this.repo.getTotalPaid(transaction.id);
-        const remainingBalance = Math.max(0, newTotalAmount - cumulativePaid);
-        paymentProgress = { cumulativePaid, remainingBalance };
-      }
+      const paymentsList = previousPayments.map((p) => ({
+        amount: p.amount,
+        paidAt: p.paid_at,
+        note: p.note,
+        receiptUrl: p.receipt_url,
+      }));
 
       // 3. Extract media from replied and add messages
       const repliedPhoto =
@@ -1230,23 +1279,22 @@ export class TransactionService {
       // Compose caption
       const repliedText = repliedMessage.text ?? repliedMessage.caption ?? '';
       const { original } = splitOriginalAndMetadata(repliedText);
-      const metadataBlock = buildMetadataBlock(
-        transaction.distributorSnapshot,
-        newTotalAmount,
-        transaction.receivedAt,
-        transaction.id,
-        transaction.notes,
-        paymentProgress,
-        {
-          initialAmount,
-          initialTimestamp: transaction.receivedAt,
-          additions: additionsList,
-        }
-      );
+      const cleanItems = stripDuplicateTotalLines(original);
+      const isMeat = /MEAT INVOICE/i.test(repliedText);
 
-      const combinedCaption = original ? composeMessageText(original, metadataBlock) : metadataBlock;
-      const safeCaption =
-        combinedCaption.length <= MAX_CAPTION_LENGTH ? combinedCaption : metadataBlock;
+      const safeCaption = buildUnifiedInvoiceCaption({
+        invoiceId: transaction.id,
+        title: isMeat ? '🥩 MEAT INVOICE' : '🧾 INVOICE',
+        distributor: transaction.distributorSnapshot,
+        itemsBreakdown: cleanItems,
+        receivedAt: transaction.receivedAt,
+        initialAmount,
+        currentAmount: newTotalAmount,
+        additions: additionsList,
+        payments: paymentsList,
+        notes: transaction.notes,
+        maxCaptionLength: MAX_CAPTION_LENGTH,
+      });
 
       // Group photos or documents if Telegram API permits
       const allPhotos = Array.from(

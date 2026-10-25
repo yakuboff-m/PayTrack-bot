@@ -46,6 +46,8 @@ export interface Payment {
   paidAt: string;
   paymentMessageId: number | null;
   confirmedMessageId: number | null;
+  receiptMessageId?: number | null;
+  receiptUrl?: string | null;
   historyMessageId: number | null;
   note: string | null;
   createdAt: string;
@@ -59,6 +61,8 @@ export interface PaymentRow {
   paid_at: string;
   payment_message_id: number | null;
   confirmed_message_id: number | null;
+  receipt_message_id?: number | null;
+  receipt_url?: string | null;
   history_message_id: number | null;
   note: string | null;
   created_at: string;
@@ -101,6 +105,7 @@ export interface Transaction {
   originalMessageId: number;
   distributorId: number | null;
   distributorSnapshot: DistributorSnapshot | null;
+  initialAmount: number | null;
   amount: number | null;
   currency: string;
   status: TransactionStatus;
@@ -122,6 +127,7 @@ export interface TransactionRow {
   original_message_id: number;
   distributor_id: number | null;
   distributor_snapshot: string | null;
+  initial_amount?: number | null;
   amount: number | null;
   currency: string;
   status: string;

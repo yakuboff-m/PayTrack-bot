@@ -269,10 +269,278 @@ export function parsePaidCommandPayload(text: string): PaidCommandPayload {
   };
 }
 
+export interface InvoiceAdditionEvent {
+  amount: number;
+  addedAt: string;
+  note?: string | null;
+}
+
+export interface PaymentEvent {
+  amount: number;
+  paidAt: string;
+  receiptUrl?: string | null;
+  note?: string | null;
+}
+
+export interface InvoiceFinancialSummary {
+  originalAmount: number | null;
+  additionsTotal: number;
+  currentInvoiceTotal: number;
+  totalPaid: number;
+  balanceDue: number;
+  status: 'PENDING' | 'PARTIALLY_PAID' | 'PAID';
+}
+
+/**
+ * Single authoritative financial calculation:
+ * - current invoice total = original invoice amount + all valid additions
+ * - total paid = sum of recorded payments
+ * - balance due = max(0, current invoice total - total paid)
+ */
+export function computeInvoiceFinancialSummary(params: {
+  initialAmount?: number | null;
+  currentAmount?: number | null;
+  additions: Array<{ amount: number }>;
+  payments: Array<{ amount: number }>;
+}): InvoiceFinancialSummary {
+  const additionsTotal = params.additions.reduce((sum, a) => sum + a.amount, 0);
+
+  let originalAmount: number | null = null;
+  if (params.initialAmount !== undefined && params.initialAmount !== null) {
+    originalAmount = params.initialAmount;
+  } else if (params.currentAmount !== undefined && params.currentAmount !== null) {
+    originalAmount = Math.max(0, params.currentAmount - additionsTotal);
+  }
+
+  const currentInvoiceTotal = (originalAmount ?? 0) + additionsTotal;
+  const totalPaid = params.payments.reduce((sum, p) => sum + p.amount, 0);
+  const balanceDue = Math.max(0, currentInvoiceTotal - totalPaid);
+
+  let status: 'PENDING' | 'PARTIALLY_PAID' | 'PAID' = 'PENDING';
+  if (totalPaid > 0 && balanceDue === 0 && currentInvoiceTotal > 0) {
+    status = 'PAID';
+  } else if (totalPaid > 0) {
+    status = 'PARTIALLY_PAID';
+  }
+
+  return {
+    originalAmount,
+    additionsTotal,
+    currentInvoiceTotal,
+    totalPaid,
+    balanceDue,
+    status,
+  };
+}
+
+/**
+ * Strips duplicate total lines from raw user invoice text/breakdown
+ * to ensure only the authoritative financial summary displays the invoice total.
+ */
+export function stripDuplicateTotalLines(text: string): string {
+  if (!text) return '';
+  return text
+    .split(/\r?\n/)
+    .filter((line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return true;
+      if (/^(?:💰\s*)?(?:Grand\s+)?Total:\s*₩?[\d,\s]+/i.test(trimmed)) return false;
+      if (/^(?:🧾\s*)?MEAT INVOICE/i.test(trimmed)) return false;
+      if (/^━+$/.test(trimmed) || /^─+$/.test(trimmed) || /^-+$/.test(trimmed)) return false;
+      return true;
+    })
+    .join('\n')
+    .trim();
+}
+
+export interface BuildUnifiedInvoiceCaptionParams {
+  invoiceId: number;
+  title?: string;
+  distributor?: DistributorSnapshot | null;
+  itemsBreakdown?: string;
+  receivedAt: string;
+  initialAmount?: number | null;
+  currentAmount?: number | null;
+  additions?: InvoiceAdditionEvent[];
+  payments?: PaymentEvent[];
+  notes?: InvoiceNote[];
+  maxCaptionLength?: number;
+}
+
+/**
+ * Builds the authoritative, append-only invoice caption with:
+ * A. Invoice identity/header
+ * B. Append-only action history (Registration, additions, payments with receipt links)
+ * C. Current financial summary (Updated invoice total, total paid, balance due, status)
+ */
+export function buildUnifiedInvoiceCaption(params: BuildUnifiedInvoiceCaptionParams): string {
+  const maxLen = params.maxCaptionLength ?? 1024;
+  const additions = params.additions ?? [];
+  const payments = params.payments ?? [];
+
+  const summary = computeInvoiceFinancialSummary({
+    initialAmount: params.initialAmount,
+    currentAmount: params.currentAmount,
+    additions,
+    payments,
+  });
+
+  // ── A. Invoice identity/header ────────────────────────────
+  const headerLines: string[] = [METADATA_SEPARATOR];
+  const invoiceTitle = params.title || '🧾 INVOICE';
+  headerLines.push(`${invoiceTitle} • ${formatInvoiceId(params.invoiceId)}`);
+
+  if (params.distributor) {
+    headerLines.push(`🏢 ${params.distributor.name}`);
+    const bankDetails = [params.distributor.bankName, params.distributor.accountNumber].filter(Boolean).join(' ');
+    if (bankDetails) {
+      const holderStr = params.distributor.accountHolder ? ` (${params.distributor.accountHolder})` : '';
+      headerLines.push(`🏦 ${bankDetails}${holderStr}`);
+    }
+  }
+  headerLines.push(METADATA_SEPARATOR);
+  const headerSection = headerLines.join('\n');
+
+  // ── Items breakdown (stripped of duplicate totals & header) ─
+  const cleanItems = params.itemsBreakdown ? stripDuplicateTotalLines(params.itemsBreakdown) : '';
+
+  // ── C. Current financial summary ──────────────────────────
+  const summaryLines: string[] = [METADATA_SEPARATOR, '📊 FINANCIAL SUMMARY'];
+  if (additions.length > 0) {
+    summaryLines.push(`💰 Updated Invoice Total: ${formatAmount(summary.currentInvoiceTotal)}`);
+  } else {
+    summaryLines.push(`💰 Invoice Total: ${formatAmount(summary.currentInvoiceTotal)}`);
+  }
+  summaryLines.push(`💵 Total Paid: ${formatAmount(summary.totalPaid)}`);
+  summaryLines.push(`⚖️ Balance Due: ${formatAmount(summary.balanceDue)}`);
+
+  const statusStr =
+    summary.status === 'PAID'
+      ? '✅ PAID'
+      : summary.status === 'PARTIALLY_PAID'
+      ? '⏳ PARTIALLY PAID'
+      : '⏳ PENDING';
+  summaryLines.push(`⏳ Status: ${statusStr}`);
+  summaryLines.push(METADATA_SEPARATOR);
+  const summarySection = summaryLines.join('\n');
+
+  // ── Notes (if any) ────────────────────────────────────────
+  const notesSection = params.notes && params.notes.length > 0 ? formatNotesBlock(params.notes) : '';
+
+  // ── Chronological unified history events ─────────────────
+  interface UnifiedHistoryEvent {
+    type: 'addition' | 'payment';
+    date: string;
+    amount: number;
+    note?: string | null;
+    receiptUrl?: string | null;
+  }
+
+  const allEvents: UnifiedHistoryEvent[] = [
+    ...additions.map((a) => ({
+      type: 'addition' as const,
+      date: a.addedAt,
+      amount: a.amount,
+      note: a.note,
+    })),
+    ...payments.map((p) => ({
+      type: 'payment' as const,
+      date: p.paidAt,
+      amount: p.amount,
+      note: p.note,
+      receiptUrl: p.receiptUrl,
+    })),
+  ].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+
+  // ── B. Append-only action history builder ──────────────────
+  const formatHistoryEvents = (
+    hiddenCount?: number,
+    visibleEvents: UnifiedHistoryEvent[] = allEvents
+  ): string => {
+    const lines: string[] = ['📜 ACTION HISTORY'];
+
+    // 1. Original registration event
+    lines.push(`📥 Original Registration · ${formatTimestamp(params.receivedAt)}`);
+    const regAmt = summary.originalAmount !== null ? formatAmount(summary.originalAmount) : 'Pending';
+    lines.push(`💵 Registered Amount: ${regAmt}`);
+
+    if (hiddenCount && hiddenCount > 0) {
+      lines.push(METADATA_SEPARATOR);
+      lines.push(`... (${hiddenCount} earlier events preserved in history) ...`);
+    }
+
+    for (const e of visibleEvents) {
+      lines.push(METADATA_SEPARATOR);
+      if (e.type === 'addition') {
+        lines.push(`➕ Invoice Addition · ${formatTimestamp(e.date)}`);
+        lines.push(`💵 Amount Added: ${formatAmount(e.amount)}`);
+        if (e.note) {
+          lines.push(`📝 Note: ${e.note}`);
+        }
+      } else {
+        const isFull =
+          summary.status === 'PAID' &&
+          e === visibleEvents.filter((ev) => ev.type === 'payment').slice(-1)[0];
+        const pLabel = isFull ? '✅ Full payment' : '💸 Partial payment';
+        lines.push(`${pLabel} · ${formatTimestamp(e.date)}`);
+        lines.push(`💵 Amount received: ${formatAmount(e.amount)}`);
+        if (e.note) {
+          lines.push(`📝 Note: ${e.note}`);
+        }
+        if (e.receiptUrl) {
+          lines.push(`🧾 Receipt: [View payment receipt](${e.receiptUrl})`);
+        }
+      }
+    }
+
+    return lines.join('\n');
+  };
+
+  const assemble = (historySec: string): string => {
+    const parts: string[] = [headerSection];
+    if (cleanItems) {
+      parts.push(cleanItems);
+      parts.push(METADATA_SEPARATOR);
+    }
+    parts.push(historySec);
+    parts.push(summarySection);
+    if (notesSection) parts.push(notesSection);
+    return parts.join('\n\n');
+  };
+
+  const fullCaption = assemble(formatHistoryEvents());
+  if (fullCaption.length <= maxLen) {
+    return fullCaption;
+  }
+
+  // Length overflow compaction: preserve registration and latest events
+  const totalEvents = allEvents.length;
+  for (let keep = totalEvents - 1; keep >= 0; keep--) {
+    const hidden = totalEvents - keep;
+    const keptEvents = allEvents.slice(hidden);
+    const compactedHistory = formatHistoryEvents(hidden, keptEvents);
+    const compactedCaption = assemble(compactedHistory);
+    if (compactedCaption.length <= maxLen) {
+      return compactedCaption;
+    }
+  }
+
+  const minimalHistory = formatHistoryEvents(totalEvents, []);
+  let minimalCaption = assemble(minimalHistory);
+  if (minimalCaption.length > maxLen && cleanItems) {
+    const overflow = minimalCaption.length - maxLen;
+    const truncatedItems = cleanItems.substring(0, Math.max(10, cleanItems.length - overflow - 5)) + '...';
+    minimalCaption = [headerSection, truncatedItems, METADATA_SEPARATOR, minimalHistory, summarySection, notesSection]
+      .filter(Boolean)
+      .join('\n\n');
+  }
+  return minimalCaption;
+}
+
 export interface AdditionsBreakdown {
   initialAmount: number;
   initialTimestamp?: string;
-  additions: Array<{ amount: number; addedAt: string }>;
+  additions: Array<{ amount: number; addedAt: string; note?: string | null }>;
 }
 
 /**
@@ -289,48 +557,37 @@ export function buildMetadataBlock(
     cumulativePaid: number;
     remainingBalance: number;
   },
-  additionsBreakdown?: AdditionsBreakdown
+  additionsBreakdown?: AdditionsBreakdown,
+  payments?: PaymentEvent[]
 ): string {
-  const lines: string[] = [METADATA_SEPARATOR];
-
-  if (invoiceId !== undefined) {
-    lines.push(`🆔 ${formatInvoiceId(invoiceId)}`);
+  if (invoiceId !== undefined && receivedAt) {
+    return buildUnifiedInvoiceCaption({
+      invoiceId,
+      distributor,
+      receivedAt,
+      initialAmount: additionsBreakdown?.initialAmount ?? amount,
+      currentAmount: amount,
+      additions: additionsBreakdown?.additions?.map((a) => ({
+        amount: a.amount,
+        addedAt: a.addedAt,
+        note: a.note,
+      })),
+      payments,
+      notes,
+    });
   }
 
+  // Fallback for calls without invoiceId
+  const lines: string[] = [METADATA_SEPARATOR];
   if (distributor) {
     lines.push(`🏢 ${distributor.name}`);
     lines.push(`🏦 ${distributor.bankName}`);
     lines.push(`💳 ${distributor.accountNumber}`);
     lines.push(`👤 ${distributor.accountHolder}`);
   }
-
-  if (additionsBreakdown && additionsBreakdown.additions.length > 0) {
-    const initTime = additionsBreakdown.initialTimestamp
-      ? ` (${formatTimestamp(additionsBreakdown.initialTimestamp)})`
-      : '';
-    lines.push(`📥 Initial: ${formatAmount(additionsBreakdown.initialAmount)}${initTime}`);
-    for (const add of additionsBreakdown.additions) {
-      lines.push(`➕ Added: ${formatAmount(add.amount)} (${formatTimestamp(add.addedAt)})`);
-    }
-    lines.push(`💰 Grand Total: ${formatAmount(amount ?? additionsBreakdown.initialAmount)}`);
-  } else if (amount !== null) {
+  if (amount !== null) {
     lines.push(`💰 ${formatAmount(amount)}`);
   }
-
-  if (paymentProgress) {
-    lines.push(`💵 Paid: ${formatAmount(paymentProgress.cumulativePaid)}`);
-    lines.push(`⚖️ Balance Due: ${formatAmount(paymentProgress.remainingBalance)}`);
-  }
-
-  if (receivedAt && (!additionsBreakdown || additionsBreakdown.additions.length === 0)) {
-    lines.push(`📅 ${formatTimestamp(receivedAt)}`);
-  }
-
-  if (notes && notes.length > 0) {
-    lines.push('');
-    lines.push(formatNotesBlock(notes));
-  }
-
   lines.push(METADATA_SEPARATOR);
   return lines.join('\n');
 }
