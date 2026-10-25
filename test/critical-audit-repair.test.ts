@@ -236,7 +236,7 @@ describe('Critical Transaction Workflow Audit & Repair Regression Suite', () => 
     const edited = editedTexts.find((e) => e.message_id === 101);
     assert.ok(edited);
     assert.match(edited.text, /Total Paid: ₩40,000/);
-    assert.match(edited.text, /⚖️ Balance Due: ₩60,000/);
+    assert.match(edited.text, /⚖️ Need to Pay: ₩60,000/);
   });
 
   // ─────────────────────────────────────────────────────────────
@@ -565,19 +565,12 @@ describe('Critical Transaction Workflow Audit & Repair Regression Suite', () => 
     assert.equal(updatedTx.amount, 150000);
     assert.equal(updatedTx.status, 'PENDING');
 
-    // Original pending invoice message edited with manual deletion notice
+    // Original pending invoice message edited in place to reflect addition
     const edited = editedTexts.find((e) => e.message_id === 107);
-    assert.ok(edited);
-    assert.match(edited.text, /Should be deleted manually/);
-    assert.match(edited.text, /🔄 UPDATED/);
-
-    // New updated invoice message created with updated invoice total and breakdown
-    const newInvoice = sentMessages.find(
-      (m) => typeof m.caption === 'string' && m.caption.includes('Updated Invoice Total: ₩150,000')
-    );
-    assert.ok(newInvoice, 'New invoice message with grand total must be created');
-    assert.match(newInvoice.caption, /Registered Amount: ₩100,000/);
-    assert.match(newInvoice.caption, /Amount Added: ₩50,000/);
+    assert.ok(edited, 'Pending invoice message must be edited in place');
+    assert.match(edited.text, /Invoice Total: ₩150,000/);
+    assert.match(edited.text, /Amount Added:\n└─> 💰 ₩50,000/);
+    assert.match(edited.text, /Need to Pay: ₩150,000/);
 
     // Admin /add message was deleted
     assert.ok(deletedMessageIds.includes(208), 'Admin /add message must be deleted');

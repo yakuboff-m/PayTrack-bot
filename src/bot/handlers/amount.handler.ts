@@ -6,7 +6,7 @@ import { requireAdmin } from '../middleware/auth.middleware';
 import { getConfig, type Config } from '../../config/config';
 import { parseAmount, formatAmount, formatInvoiceId } from '../helpers/format.helpers';
 import { copyAccountKeyboard } from '../keyboards/keyboards';
-import { getEffectiveRepliedMessage } from '../helpers/telegram.helpers';
+import { getEffectiveRepliedMessage, extractMediaInfo } from '../helpers/telegram.helpers';
 import { parseMeatInvoice } from '../../transactions/meat-invoice';
 
 /**
@@ -87,13 +87,17 @@ export function registerAmountHandler(
         }
 
         const chatId = String(ctx.chat.id);
+        const repliedMedia = extractMediaInfo(repliedMsg);
         let transaction = await transactionService.findByAnyMessageId(chatId, repliedMsg.message_id);
         if (!transaction) {
           try {
             transaction = await transactionService.registerTransaction(
               chatId,
               config.pendingTopicId,
-              repliedMsg.message_id
+              repliedMsg.message_id,
+              undefined,
+              repliedMedia.mediaFileId,
+              repliedMedia.mediaType
             );
           } catch {
             await ctx.reply('❌ Could not find or register this transaction.', {
@@ -101,6 +105,14 @@ export function registerAmountHandler(
             });
             return;
           }
+        } else if (!transaction.mediaFileId && repliedMedia.mediaFileId) {
+          await transactionService.updateTransactionMedia(
+            transaction.id,
+            repliedMedia.mediaFileId,
+            repliedMedia.mediaType
+          );
+          transaction.mediaFileId = repliedMedia.mediaFileId;
+          transaction.mediaType = repliedMedia.mediaType;
         }
 
         if (transaction.status !== 'PENDING') {
@@ -181,13 +193,17 @@ export function registerAmountHandler(
         }
 
         const chatId = String(ctx.chat.id);
+        const repliedMedia = extractMediaInfo(repliedMsg);
         let transaction = await transactionService.findByAnyMessageId(chatId, repliedMsg.message_id);
         if (!transaction) {
           try {
             transaction = await transactionService.registerTransaction(
               chatId,
               config.pendingTopicId,
-              repliedMsg.message_id
+              repliedMsg.message_id,
+              undefined,
+              repliedMedia.mediaFileId,
+              repliedMedia.mediaType
             );
           } catch {
             await ctx.reply('❌ Could not find or register this transaction.', {
@@ -195,6 +211,14 @@ export function registerAmountHandler(
             });
             return;
           }
+        } else if (!transaction.mediaFileId && repliedMedia.mediaFileId) {
+          await transactionService.updateTransactionMedia(
+            transaction.id,
+            repliedMedia.mediaFileId,
+            repliedMedia.mediaType
+          );
+          transaction.mediaFileId = repliedMedia.mediaFileId;
+          transaction.mediaType = repliedMedia.mediaType;
         }
 
         if (transaction.status === 'PAID') {

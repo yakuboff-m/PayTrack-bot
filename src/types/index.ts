@@ -121,6 +121,8 @@ export interface Transaction {
   historyMessageId: number | null;
   metadataMessageId: number | null;
   notes: InvoiceNote[];
+  mediaFileId?: string | null;
+  mediaType?: string | null;
   createdAt: string;
 }
 
@@ -143,6 +145,8 @@ export interface TransactionRow {
   history_message_id: number | null;
   metadata_message_id: number | null;
   notes: string | null;
+  media_file_id?: string | null;
+  media_type?: string | null;
   created_at: string;
 }
 

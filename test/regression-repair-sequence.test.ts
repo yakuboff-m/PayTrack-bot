@@ -1,0 +1,496 @@
+import { describe, it } from 'node:test';
+import assert from 'node:assert/strict';
+import Database from 'better-sqlite3';
+import fs from 'fs';
+import path from 'path';
+import { SqliteDatabaseAdapter } from '../src/database/adapter';
+import { DistributorRepository } from '../src/distributors/distributor.repository';
+import { DistributorService } from '../src/distributors/distributor.service';
+import { TransactionRepository } from '../src/transactions/transaction.repository';
+import { TransactionService } from '../src/transactions/transaction.service';
+import { createBot } from '../src/bot/bot';
+import type { Config } from '../src/config/config';
+
+function createInMemoryDb(): SqliteDatabaseAdapter {
+  const sqlite = new Database(':memory:');
+  const schemaPath = path.join(__dirname, '../src/database/schema.sql');
+  const schema = fs.readFileSync(schemaPath, 'utf-8');
+  sqlite.exec(schema);
+  return new SqliteDatabaseAdapter(sqlite);
+}
+
+const testConfig: Config = {
+  botToken: '123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ',
+  telegramGroupId: -1004463761895,
+  pendingTopicId: 2,
+  confirmedTopicId: 3,
+  adminUserIds: [111],
+};
+
+async function setupTestHarness() {
+  const db = createInMemoryDb();
+  const distRepo = new DistributorRepository(db);
+  const distService = new DistributorService(distRepo);
+  const txRepo = new TransactionRepository(db);
+  const txService = new TransactionService(txRepo, testConfig);
+
+  const distributor = await distService.create({
+    name: 'Koreta',
+    alias: 'koreta',
+    bankName: 'Hana Bank',
+    accountNumber: '012-345678-2341',
+    accountHolder: 'Koreta CoLtd',
+  });
+
+  const apiCalls: Array<{ method: string; payload: any }> = [];
+  const sentMessages: any[] = [];
+  const editedCaptions: any[] = [];
+  const editedTexts: any[] = [];
+  const deletedMessageIds: number[] = [];
+  const copiedMessages: any[] = [];
+
+  const { bot } = createBot({
+    config: testConfig,
+    db,
+    executionContext: { waitUntil: () => {} } as any,
+  });
+
+  bot.api.config.use(async (prev, method, payload: any) => {
+    apiCalls.push({ method, payload });
+
+    if (method === 'sendMessage') {
+      const id = 7000 + sentMessages.length;
+      sentMessages.push({ ...payload, message_id: id });
+      return {
+        ok: true,
+        result: {
+          message_id: id,
+          chat: { id: payload.chat_id },
+          date: Math.floor(Date.now() / 1000),
+          ...payload,
+        } as any,
+      };
+    }
+
+    if (method === 'sendPhoto' || method === 'sendDocument') {
+      const id = 7500 + sentMessages.length;
+      sentMessages.push({ ...payload, message_id: id });
+      return {
+        ok: true,
+        result: {
+          message_id: id,
+          chat: { id: payload.chat_id },
+          date: Math.floor(Date.now() / 1000),
+          ...payload,
+        } as any,
+      };
+    }
+
+    if (method === 'copyMessage') {
+      const id = 9000 + copiedMessages.length;
+      copiedMessages.push({ ...payload, message_id: id });
+      return {
+        ok: true,
+        result: {
+          message_id: id,
+          chat: { id: payload.chat_id },
+        } as any,
+      };
+    }
+
+    if (method === 'sendMediaGroup') {
+      const baseId = 8000 + sentMessages.length * 10;
+      const results = payload.media.map((m: any, idx: number) => ({
+        message_id: baseId + idx,
+        chat: { id: payload.chat_id },
+        date: Math.floor(Date.now() / 1000),
+        ...m,
+      }));
+      sentMessages.push(...results);
+      return { ok: true, result: results as any };
+    }
+
+    if (method === 'editMessageText') {
+      editedTexts.push(payload);
+      return {
+        ok: true,
+        result: {
+          message_id: payload.message_id,
+          text: payload.text,
+          chat: { id: payload.chat_id },
+        } as any,
+      };
+    }
+
+    if (method === 'editMessageCaption') {
+      editedCaptions.push(payload);
+      return {
+        ok: true,
+        result: {
+          message_id: payload.message_id,
+          caption: payload.caption,
+          chat: { id: payload.chat_id },
+        } as any,
+      };
+    }
+
+    if (method === 'deleteMessage') {
+      deletedMessageIds.push(payload.message_id);
+      return { ok: true, result: true as any };
+    }
+
+    return { ok: true, result: {} as any };
+  });
+
+  return {
+    db,
+    distService,
+    distributor,
+    txRepo,
+    txService,
+    bot,
+    apiCalls,
+    sentMessages,
+    editedCaptions,
+    editedTexts,
+    deletedMessageIds,
+    copiedMessages,
+  };
+}
+
+describe('Regression Repair Sequence Suite', () => {
+  it('Complete Sequence: Registration ₩340k -> /add ₩200k with media -> note -> partial payment ₩140k -> full payment', async () => {
+    const harness = await setupTestHarness();
+    const { bot, txRepo, txService, distService, distributor, sentMessages, editedCaptions } = harness;
+
+    // ─────────────────────────────────────────────────────────────
+    // Step 1: Register invoice with original media and amount ₩340,000
+    // ─────────────────────────────────────────────────────────────
+    const initialPhotoMsg = {
+      message_id: 101,
+      from: { id: 222, is_bot: false },
+      chat: { id: testConfig.telegramGroupId, type: 'supergroup' },
+      message_thread_id: testConfig.pendingTopicId,
+      photo: [{ file_id: 'original_invoice_photo_id', width: 800, height: 600 }],
+      caption: 'Initial meat batch delivery',
+    };
+
+    // Auto-register invoice message
+    await bot.handleUpdate({
+      update_id: 1,
+      message: initialPhotoMsg,
+    } as any);
+
+    // Assign distributor and amount via /koreta 340000
+    await bot.handleUpdate({
+      update_id: 2,
+      message: {
+        message_id: 102,
+        from: { id: 111, is_bot: false },
+        chat: { id: testConfig.telegramGroupId, type: 'supergroup' },
+        message_thread_id: testConfig.pendingTopicId,
+        text: '/koreta 340000',
+        reply_to_message: initialPhotoMsg,
+      },
+    } as any);
+
+    // Verify bot re-sent user message as clean bot-owned message preserving the original photo
+    const registeredBotMsg = sentMessages.find((m) => m.photo === 'original_invoice_photo_id');
+    assert.ok(registeredBotMsg, 'Bot must send message with original photo');
+    const primaryMsgId = registeredBotMsg.message_id;
+
+    const tx1 = (await txService.findByAnyMessageId(String(testConfig.telegramGroupId), primaryMsgId))!;
+    assert.ok(tx1, 'Transaction must be registered');
+    assert.equal(tx1.amount, 340000);
+    assert.equal(tx1.mediaFileId, 'original_invoice_photo_id');
+    assert.equal(tx1.mediaType, 'photo');
+
+    // Verify caption and inline keyboard on primary message
+    assert.match(registeredBotMsg.caption, /🧾 INVOICE • #INV0001/);
+    assert.match(registeredBotMsg.caption, /🏢 Koreta/);
+    assert.match(registeredBotMsg.caption, /💳 Hana Bank 012-345678-2341/);
+    assert.match(registeredBotMsg.caption, /👤 Koreta CoLtd/);
+    assert.match(registeredBotMsg.caption, /📥 Original Registration:/);
+    assert.match(registeredBotMsg.caption, /💵 Registered Amount:\n└─> 💰 ₩340,000/);
+    assert.match(registeredBotMsg.caption, /💰 Invoice Total: ₩340,000/);
+    assert.match(registeredBotMsg.caption, /💵 Total Paid: ₩0/);
+    assert.match(registeredBotMsg.caption, /⚖️ Need to Pay: ₩340,000/);
+    assert.match(registeredBotMsg.caption, /📊 Status: ⏳ PENDING/);
+    assert.ok(registeredBotMsg.reply_markup?.inline_keyboard?.length > 0);
+    assert.equal(registeredBotMsg.reply_markup.inline_keyboard[0][0].text, 'Copy Account Number');
+
+    // ─────────────────────────────────────────────────────────────
+    // Step 2: /add 200,000 while replying to the invoice with new media
+    // ─────────────────────────────────────────────────────────────
+    await bot.handleUpdate({
+      update_id: 3,
+      message: {
+        message_id: 201,
+        from: { id: 111, is_bot: false },
+        chat: { id: testConfig.telegramGroupId, type: 'supergroup' },
+        message_thread_id: testConfig.pendingTopicId,
+        photo: [{ file_id: 'addition_invoice_photo_id', width: 800, height: 600 }],
+        caption: '/add 200000 what about note',
+        reply_to_message: {
+          message_id: primaryMsgId,
+          chat: { id: testConfig.telegramGroupId },
+          message_thread_id: testConfig.pendingTopicId,
+          photo: [{ file_id: 'original_invoice_photo_id' }],
+          caption: registeredBotMsg.caption,
+        },
+      },
+    } as any);
+
+    // Verify primary invoice message was edited in place via editMessageCaption
+    const editAfterAdd = editedCaptions.find((e) => e.message_id === primaryMsgId);
+    assert.ok(editAfterAdd, 'Primary invoice message must be edited in place');
+
+    // Verify NO new photo message was sent (must not replace original photo!)
+    const sentPhotosAfterAdd = sentMessages.filter((m) => m.photo === 'addition_invoice_photo_id');
+    assert.equal(sentPhotosAfterAdd.length, 0, 'Must NEVER send new photo message replacing the original media');
+
+    // Verify database state: total is ₩540,000 and original media remains intact
+    const txAfterAdd = (await txRepo.findById(tx1.id))!;
+    assert.equal(txAfterAdd.amount, 540000);
+    assert.equal(txAfterAdd.media_file_id, 'original_invoice_photo_id', 'Original media must be preserved');
+    assert.equal(txAfterAdd.media_type, 'photo');
+
+    // Verify addition media stored separately in invoice_additions table
+    const additions = await txRepo.getAdditions(tx1.id);
+    assert.equal(additions.length, 1);
+    assert.equal(additions[0].amount, 200000);
+    assert.equal(additions[0].media_file_id, 'addition_invoice_photo_id');
+    assert.equal(additions[0].media_type, 'photo');
+    assert.equal(additions[0].note, 'what about note');
+
+    // Verify exact caption format after addition
+    assert.match(editAfterAdd.caption, /📥 Original Registration:/);
+    assert.match(editAfterAdd.caption, /💵 Registered Amount:\n└─> 💰 ₩340,000/);
+    assert.match(editAfterAdd.caption, /➕ Invoice Addition/);
+    assert.match(editAfterAdd.caption, /💵 Amount Added:\n└─> 💰 ₩200,000/);
+    assert.match(editAfterAdd.caption, /📝 Note: what about note/);
+    assert.match(editAfterAdd.caption, /💰 Invoice Total: ₩540,000/);
+    assert.match(editAfterAdd.caption, /💵 Total Paid: ₩0/);
+    assert.match(editAfterAdd.caption, /⚖️ Need to Pay: ₩540,000/);
+    assert.match(editAfterAdd.caption, /📊 Status: ⏳ PENDING/);
+    assert.ok(editAfterAdd.reply_markup?.inline_keyboard?.length > 0);
+    assert.equal(editAfterAdd.reply_markup.inline_keyboard[0][0].text, 'Copy Account Number');
+
+    // ─────────────────────────────────────────────────────────────
+    // Step 3: Record a ₩140,000 partial payment with receipt evidence
+    // ─────────────────────────────────────────────────────────────
+    await bot.handleUpdate({
+      update_id: 4,
+      message: {
+        message_id: 301,
+        from: { id: 111, is_bot: false },
+        chat: { id: testConfig.telegramGroupId, type: 'supergroup' },
+        message_thread_id: testConfig.pendingTopicId,
+        photo: [{ file_id: 'receipt_photo_140k', width: 800, height: 600 }],
+        caption: '/paid 140000',
+        reply_to_message: {
+          message_id: primaryMsgId,
+          chat: { id: testConfig.telegramGroupId },
+          message_thread_id: testConfig.pendingTopicId,
+          photo: [{ file_id: 'original_invoice_photo_id' }],
+          caption: editAfterAdd.caption,
+        },
+      },
+    } as any);
+
+    // Verify database state: status PARTIALLY_PAID, totalPaid 140000, balance 400000
+    const txAfterPay = (await txRepo.findById(tx1.id))!;
+    assert.equal(txAfterPay.status, 'PARTIALLY_PAID');
+    assert.equal(txAfterPay.amount, 540000);
+    assert.equal(txAfterPay.media_file_id, 'original_invoice_photo_id');
+
+    const totalPaid = await txRepo.getTotalPaid(tx1.id);
+    assert.equal(totalPaid, 140000);
+
+    const payments = await txRepo.getPayments(tx1.id);
+    assert.equal(payments.length, 1);
+    assert.equal(payments[0].amount, 140000);
+    assert.ok(payments[0].receipt_url, 'Receipt URL must be recorded');
+    assert.match(payments[0].receipt_url, /https:\/\/t\.me\/c\/4463761895\/\d+/);
+
+    // Verify primary invoice message caption was edited in place
+    const editsForPrimary = editedCaptions.filter((e) => e.message_id === primaryMsgId);
+    const latestEdit = editsForPrimary[editsForPrimary.length - 1];
+    assert.ok(latestEdit);
+
+    const finalCaption = latestEdit.caption;
+
+    // Check divider counts: exactly 6 divider lines
+    const dividerMatches = finalCaption.match(/━━━━━━━━━━━━/g);
+    assert.equal(dividerMatches?.length, 6, 'Must contain exactly 6 divider lines');
+
+    // Verify all 3 chronological action history blocks are present
+    assert.match(finalCaption, /📥 Original Registration:/);
+    assert.match(finalCaption, /💵 Registered Amount:\n└─> 💰 ₩340,000/);
+    assert.match(finalCaption, /➕ Invoice Addition/);
+    assert.match(finalCaption, /💵 Amount Added:\n└─> 💰 ₩200,000/);
+    assert.match(finalCaption, /📝 Note: what about note/);
+    assert.match(finalCaption, /➖ Partial payment/);
+    assert.match(finalCaption, /💵 Amount paid:\n└─> 💰 ₩140,000/);
+    assert.match(finalCaption, /🧾 Receipt URL:\n└─> 🔗 https:\/\/t\.me\/c\/4463761895\/\d+/);
+
+    // Verify Financial Summary
+    assert.match(finalCaption, /💰 Invoice Total: ₩540,000/);
+    assert.match(finalCaption, /💵 Total Paid: ₩140,000/);
+    assert.match(finalCaption, /⚖️ Need to Pay: ₩400,000/);
+    assert.match(finalCaption, /📊 Status: ⏳ PARTIALLY PAID/);
+
+    // Verify keyboard remains attached
+    assert.ok(latestEdit.reply_markup?.inline_keyboard?.length > 0);
+    assert.equal(latestEdit.reply_markup.inline_keyboard[0][0].text, 'Copy Account Number');
+
+    // ─────────────────────────────────────────────────────────────
+    // Step 4: Full payment of remaining balance (₩400,000)
+    // ─────────────────────────────────────────────────────────────
+    await bot.handleUpdate({
+      update_id: 5,
+      message: {
+        message_id: 401,
+        from: { id: 111, is_bot: false },
+        chat: { id: testConfig.telegramGroupId, type: 'supergroup' },
+        message_thread_id: testConfig.pendingTopicId,
+        photo: [{ file_id: 'receipt_photo_400k' }],
+        caption: '/paid 400000',
+        reply_to_message: {
+          message_id: primaryMsgId,
+          chat: { id: testConfig.telegramGroupId },
+          message_thread_id: testConfig.pendingTopicId,
+          photo: [{ file_id: 'original_invoice_photo_id' }],
+          caption: finalCaption,
+        },
+      },
+    } as any);
+
+    const txFullyPaid = (await txRepo.findById(tx1.id))!;
+    assert.equal(txFullyPaid.status, 'PAID');
+    const finalTotalPaid = await txRepo.getTotalPaid(tx1.id);
+    assert.equal(finalTotalPaid, 540000);
+
+    // Check confirmed topic received confirmation
+    assert.ok(txFullyPaid.confirmation_message_id);
+    assert.ok(txFullyPaid.confirmation_url);
+  });
+
+  it('Document/PDF invoices: preserves document media and edits caption in place', async () => {
+    const harness = await setupTestHarness();
+    const { bot, txRepo, txService, sentMessages, editedCaptions } = harness;
+
+    // 1. User sends PDF invoice
+    const initialDocMsg = {
+      message_id: 1101,
+      from: { id: 222, is_bot: false },
+      chat: { id: testConfig.telegramGroupId, type: 'supergroup' },
+      message_thread_id: testConfig.pendingTopicId,
+      document: { file_id: 'invoice_pdf_file_id', file_name: 'invoice_001.pdf' },
+      caption: 'Meat invoice PDF',
+    };
+
+    await bot.handleUpdate({ update_id: 11, message: initialDocMsg } as any);
+    await bot.handleUpdate({
+      update_id: 12,
+      message: {
+        message_id: 1102,
+        from: { id: 111, is_bot: false },
+        chat: { id: testConfig.telegramGroupId, type: 'supergroup' },
+        message_thread_id: testConfig.pendingTopicId,
+        text: '/koreta 500000',
+        reply_to_message: initialDocMsg,
+      },
+    } as any);
+
+    const docMsg = sentMessages.find((m) => m.document === 'invoice_pdf_file_id');
+    assert.ok(docMsg, 'Must send primary document message');
+    const primaryId = docMsg.message_id;
+
+    // 2. /add 150000
+    await bot.handleUpdate({
+      update_id: 13,
+      message: {
+        message_id: 1201,
+        from: { id: 111, is_bot: false },
+        chat: { id: testConfig.telegramGroupId, type: 'supergroup' },
+        message_thread_id: testConfig.pendingTopicId,
+        document: { file_id: 'addition_pdf_file_id', file_name: 'add.pdf' },
+        caption: '/add 150000 Extra cuts',
+        reply_to_message: {
+          message_id: primaryId,
+          chat: { id: testConfig.telegramGroupId },
+          message_thread_id: testConfig.pendingTopicId,
+          document: { file_id: 'invoice_pdf_file_id' },
+          caption: docMsg.caption,
+        },
+      },
+    } as any);
+
+    const edit = editedCaptions.find((e) => e.message_id === primaryId);
+    assert.ok(edit, 'Document message must be edited in place');
+    assert.match(edit.caption, /💰 Invoice Total: ₩650,000/);
+    assert.match(edit.caption, /⚖️ Need to Pay: ₩650,000/);
+
+    const tx = (await txService.findByAnyMessageId(String(testConfig.telegramGroupId), primaryId))!;
+    assert.equal(tx.mediaFileId, 'invoice_pdf_file_id', 'Original document preserved in DB');
+    assert.equal(tx.mediaType, 'document');
+  });
+
+  it('Text-only invoices: preserves text editing and updates financial ledger', async () => {
+    const harness = await setupTestHarness();
+    const { bot, txRepo, txService, sentMessages, editedTexts } = harness;
+
+    // 1. Text-only invoice
+    const initialTextMsg = {
+      message_id: 2101,
+      from: { id: 222, is_bot: false },
+      chat: { id: testConfig.telegramGroupId, type: 'supergroup' },
+      message_thread_id: testConfig.pendingTopicId,
+      text: 'Beef items:\n1. 50kg Ribs = ₩300,000',
+    };
+
+    await bot.handleUpdate({ update_id: 21, message: initialTextMsg } as any);
+    await bot.handleUpdate({
+      update_id: 22,
+      message: {
+        message_id: 2102,
+        from: { id: 111, is_bot: false },
+        chat: { id: testConfig.telegramGroupId, type: 'supergroup' },
+        message_thread_id: testConfig.pendingTopicId,
+        text: '/koreta 300000',
+        reply_to_message: initialTextMsg,
+      },
+    } as any);
+
+    const textMsg = sentMessages.find((m) => m.text && !m.photo && !m.document);
+    assert.ok(textMsg);
+    const primaryId = textMsg.message_id;
+
+    // 2. /add 100000
+    await bot.handleUpdate({
+      update_id: 23,
+      message: {
+        message_id: 2201,
+        from: { id: 111, is_bot: false },
+        chat: { id: testConfig.telegramGroupId, type: 'supergroup' },
+        message_thread_id: testConfig.pendingTopicId,
+        text: '/add 100000',
+        reply_to_message: {
+          message_id: primaryId,
+          chat: { id: testConfig.telegramGroupId },
+          message_thread_id: testConfig.pendingTopicId,
+          text: textMsg.text,
+        },
+      },
+    } as any);
+
+    const edit = editedTexts.find((e) => e.message_id === primaryId);
+    assert.ok(edit, 'Text invoice must be edited via editMessageText');
+    assert.match(edit.text, /💰 Invoice Total: ₩400,000/);
+    assert.match(edit.text, /⚖️ Need to Pay: ₩400,000/);
+
+    const tx = (await txService.findByAnyMessageId(String(testConfig.telegramGroupId), primaryId))!;
+    assert.equal(tx.amount, 400000);
+  });
+});

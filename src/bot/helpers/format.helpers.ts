@@ -377,6 +377,7 @@ export function buildUnifiedInvoiceCaption(params: BuildUnifiedInvoiceCaptionPar
   const maxLen = params.maxCaptionLength ?? 1024;
   const additions = params.additions ?? [];
   const payments = params.payments ?? [];
+  const notes = params.notes ?? [];
 
   const summary = computeInvoiceFinancialSummary({
     initialAmount: params.initialAmount,
@@ -389,152 +390,172 @@ export function buildUnifiedInvoiceCaption(params: BuildUnifiedInvoiceCaptionPar
   const headerLines: string[] = [METADATA_SEPARATOR];
   const invoiceTitle = params.title || '🧾 INVOICE';
   headerLines.push(`${invoiceTitle} • ${formatInvoiceId(params.invoiceId)}`);
+  headerLines.push(METADATA_SEPARATOR);
 
   if (params.distributor) {
     headerLines.push(`🏢 ${params.distributor.name}`);
     const bankDetails = [params.distributor.bankName, params.distributor.accountNumber].filter(Boolean).join(' ');
     if (bankDetails) {
-      const holderStr = params.distributor.accountHolder ? ` (${params.distributor.accountHolder})` : '';
-      headerLines.push(`🏦 ${bankDetails}${holderStr}`);
+      headerLines.push(`💳 ${bankDetails}`);
+    }
+    if (params.distributor.accountHolder) {
+      headerLines.push(`👤 ${params.distributor.accountHolder}`);
     }
   }
-  headerLines.push(METADATA_SEPARATOR);
-  const headerSection = headerLines.join('\n');
 
   // ── Items breakdown (stripped of duplicate totals & header) ─
   const cleanItems = params.itemsBreakdown ? stripDuplicateTotalLines(params.itemsBreakdown) : '';
+  if (cleanItems) {
+    headerLines.push(cleanItems);
+  }
+
+  // ── B. Append-only action history ─────────────────────────
+  type HistoryItem =
+    | { type: 'addition'; date: string; amount: number; note?: string | null }
+    | { type: 'note'; date: string; text: string }
+    | { type: 'payment'; date: string; amount: number; note?: string | null; receiptUrl?: string | null };
+
+  const eventList: HistoryItem[] = [];
+
+  for (const a of additions) {
+    eventList.push({
+      type: 'addition',
+      date: a.addedAt,
+      amount: a.amount,
+      note: a.note,
+    });
+  }
+
+  for (const n of notes) {
+    eventList.push({
+      type: 'note',
+      date: n.createdAt,
+      text: n.text,
+    });
+  }
+
+  for (const p of payments) {
+    eventList.push({
+      type: 'payment',
+      date: p.paidAt,
+      amount: p.amount,
+      note: p.note,
+      receiptUrl: p.receiptUrl,
+    });
+  }
+
+  // Chronological sort
+  eventList.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+
+  const formatRegistrationBlock = (): string => {
+    const regAmt = summary.originalAmount !== null ? formatAmount(summary.originalAmount) : 'Not set';
+    return [
+      '📥 Original Registration:',
+      `└─> 🕧 ${formatTimestamp(params.receivedAt)}`,
+      '💵 Registered Amount:',
+      `└─> 💰 ${regAmt}`,
+    ].join('\n');
+  };
+
+  const formatEventBlock = (item: HistoryItem, isLastPayment?: boolean): string => {
+    if (item.type === 'addition') {
+      const lines = [
+        '➕ Invoice Addition',
+        `└─> 🕧 ${formatTimestamp(item.date)}`,
+        '💵 Amount Added:',
+        `└─> 💰 ${formatAmount(item.amount)}`,
+      ];
+      if (item.note) {
+        lines.push(`📝 Note: ${item.note}`);
+      }
+      return lines.join('\n');
+    }
+    if (item.type === 'note') {
+      return `📝 Note: ${item.text}`;
+    }
+    if (item.type === 'payment') {
+      const isFull = summary.status === 'PAID' && isLastPayment;
+      const pLabel = isFull ? '✅ Full payment' : '➖ Partial payment';
+      const lines = [
+        pLabel,
+        `└─> 🕧 ${formatTimestamp(item.date)}`,
+        '💵 Amount paid:',
+        `└─> 💰 ${formatAmount(item.amount)}`,
+      ];
+      if (item.receiptUrl) {
+        lines.push('🧾 Receipt URL:');
+        lines.push(`└─> 🔗 ${item.receiptUrl}`);
+      }
+      if (item.note) {
+        lines.push(`📝 Note: ${item.note}`);
+      }
+      return lines.join('\n');
+    }
+    return '';
+  };
+
+  const paymentEvents = eventList.filter((e) => e.type === 'payment');
+  const lastPayment = paymentEvents.length > 0 ? paymentEvents[paymentEvents.length - 1] : null;
+
+  const allActionBlocks = [
+    formatRegistrationBlock(),
+    ...eventList.map((e) => formatEventBlock(e, e === lastPayment)),
+  ];
 
   // ── C. Current financial summary ──────────────────────────
-  const summaryLines: string[] = [METADATA_SEPARATOR, '📊 FINANCIAL SUMMARY'];
-  if (additions.length > 0) {
-    summaryLines.push(`💰 Updated Invoice Total: ${formatAmount(summary.currentInvoiceTotal)}`);
-  } else {
-    summaryLines.push(`💰 Invoice Total: ${formatAmount(summary.currentInvoiceTotal)}`);
-  }
-  summaryLines.push(`💵 Total Paid: ${formatAmount(summary.totalPaid)}`);
-  summaryLines.push(`⚖️ Balance Due: ${formatAmount(summary.balanceDue)}`);
-
   const statusStr =
     summary.status === 'PAID'
       ? '✅ PAID'
       : summary.status === 'PARTIALLY_PAID'
       ? '⏳ PARTIALLY PAID'
       : '⏳ PENDING';
-  summaryLines.push(`⏳ Status: ${statusStr}`);
-  summaryLines.push(METADATA_SEPARATOR);
-  const summarySection = summaryLines.join('\n');
 
-  // ── Notes (if any) ────────────────────────────────────────
-  const notesSection = params.notes && params.notes.length > 0 ? formatNotesBlock(params.notes) : '';
+  const summaryLines: string[] = [
+    METADATA_SEPARATOR,
+    '📊 FINANCIAL SUMMARY',
+    METADATA_SEPARATOR,
+    `💰 Invoice Total: ${formatAmount(summary.currentInvoiceTotal)}`,
+    `💵 Total Paid: ${formatAmount(summary.totalPaid)}`,
+    `⚖️ Need to Pay: ${formatAmount(summary.balanceDue)}`,
+    `📊 Status: ${statusStr}`,
+  ];
 
-  // ── Chronological unified history events ─────────────────
-  interface UnifiedHistoryEvent {
-    type: 'addition' | 'payment';
-    date: string;
-    amount: number;
-    note?: string | null;
-    receiptUrl?: string | null;
-  }
-
-  const allEvents: UnifiedHistoryEvent[] = [
-    ...additions.map((a) => ({
-      type: 'addition' as const,
-      date: a.addedAt,
-      amount: a.amount,
-      note: a.note,
-    })),
-    ...payments.map((p) => ({
-      type: 'payment' as const,
-      date: p.paidAt,
-      amount: p.amount,
-      note: p.note,
-      receiptUrl: p.receiptUrl,
-    })),
-  ].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
-
-  // ── B. Append-only action history builder ──────────────────
-  const formatHistoryEvents = (
-    hiddenCount?: number,
-    visibleEvents: UnifiedHistoryEvent[] = allEvents
-  ): string => {
-    const lines: string[] = ['📜 ACTION HISTORY'];
-
-    // 1. Original registration event
-    lines.push(`📥 Original Registration · ${formatTimestamp(params.receivedAt)}`);
-    const regAmt = summary.originalAmount !== null ? formatAmount(summary.originalAmount) : 'Pending';
-    lines.push(`💵 Registered Amount: ${regAmt}`);
-
-    if (hiddenCount && hiddenCount > 0) {
-      lines.push(METADATA_SEPARATOR);
-      lines.push(`... (${hiddenCount} earlier events preserved in history) ...`);
-    }
-
-    for (const e of visibleEvents) {
-      lines.push(METADATA_SEPARATOR);
-      if (e.type === 'addition') {
-        lines.push(`➕ Invoice Addition · ${formatTimestamp(e.date)}`);
-        lines.push(`💵 Amount Added: ${formatAmount(e.amount)}`);
-        if (e.note) {
-          lines.push(`📝 Note: ${e.note}`);
-        }
-      } else {
-        const isFull =
-          summary.status === 'PAID' &&
-          e === visibleEvents.filter((ev) => ev.type === 'payment').slice(-1)[0];
-        const pLabel = isFull ? '✅ Full payment' : '💸 Partial payment';
-        lines.push(`${pLabel} · ${formatTimestamp(e.date)}`);
-        lines.push(`💵 Amount received: ${formatAmount(e.amount)}`);
-        if (e.note) {
-          lines.push(`📝 Note: ${e.note}`);
-        }
-        if (e.receiptUrl) {
-          lines.push(`🧾 Receipt: [View payment receipt](${e.receiptUrl})`);
-        }
-      }
-    }
-
-    return lines.join('\n');
+  const assemble = (actions: string[]): string => {
+    return [
+      headerLines.join('\n'),
+      METADATA_SEPARATOR,
+      '📜 ACTION HISTORY',
+      METADATA_SEPARATOR,
+      actions.join('\n\n'),
+      summaryLines.join('\n'),
+    ].join('\n');
   };
 
-  const assemble = (historySec: string): string => {
-    const parts: string[] = [headerSection];
-    if (cleanItems) {
-      parts.push(cleanItems);
-      parts.push(METADATA_SEPARATOR);
-    }
-    parts.push(historySec);
-    parts.push(summarySection);
-    if (notesSection) parts.push(notesSection);
-    return parts.join('\n\n');
-  };
-
-  const fullCaption = assemble(formatHistoryEvents());
+  const fullCaption = assemble(allActionBlocks);
   if (fullCaption.length <= maxLen) {
     return fullCaption;
   }
 
   // Length overflow compaction: preserve registration and latest events
-  const totalEvents = allEvents.length;
-  for (let keep = totalEvents - 1; keep >= 0; keep--) {
-    const hidden = totalEvents - keep;
-    const keptEvents = allEvents.slice(hidden);
-    const compactedHistory = formatHistoryEvents(hidden, keptEvents);
-    const compactedCaption = assemble(compactedHistory);
-    if (compactedCaption.length <= maxLen) {
-      return compactedCaption;
+  for (let keep = eventList.length - 1; keep >= 0; keep--) {
+    const hidden = eventList.length - keep;
+    const keptEvents = eventList.slice(hidden);
+    const compactedBlocks = [
+      formatRegistrationBlock(),
+      `... (${hidden} earlier events preserved in history) ...`,
+      ...keptEvents.map((e) => formatEventBlock(e, e === lastPayment)),
+    ];
+    const compacted = assemble(compactedBlocks);
+    if (compacted.length <= maxLen) {
+      return compacted;
     }
   }
 
-  const minimalHistory = formatHistoryEvents(totalEvents, []);
-  let minimalCaption = assemble(minimalHistory);
-  if (minimalCaption.length > maxLen && cleanItems) {
-    const overflow = minimalCaption.length - maxLen;
-    const truncatedItems = cleanItems.substring(0, Math.max(10, cleanItems.length - overflow - 5)) + '...';
-    minimalCaption = [headerSection, truncatedItems, METADATA_SEPARATOR, minimalHistory, summarySection, notesSection]
-      .filter(Boolean)
-      .join('\n\n');
-  }
-  return minimalCaption;
+  const minimalBlocks = [
+    formatRegistrationBlock(),
+    `... (${eventList.length} earlier events preserved in history) ...`,
+  ];
+  return assemble(minimalBlocks);
 }
 
 export interface AdditionsBreakdown {

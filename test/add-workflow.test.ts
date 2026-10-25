@@ -155,14 +155,17 @@ async function setupTestContext() {
 }
 
 describe('/add Workflow Regression Suite', () => {
-  it('1. Photo invoice + photo /add: creates media group album, breakdown caption, edits old invoice with warning, deletes admin message', async () => {
+  it('1. Photo invoice + photo /add: edits primary invoice in place, preserves original media, stores addition separately, deletes admin message', async () => {
     const ctx = await setupTestContext();
 
     // 1. Initial photo invoice
     const tx = await ctx.txService.registerTransaction(
       String(testConfig.telegramGroupId),
       testConfig.pendingTopicId,
-      501
+      501,
+      undefined,
+      'photo_initial_1',
+      'photo'
     );
     const snapshot = ctx.distService.createSnapshot(ctx.distributor);
     await ctx.txService.assignDistributor(tx.id, ctx.distributor.id, snapshot);
@@ -189,33 +192,38 @@ describe('/add Workflow Regression Suite', () => {
       },
     } as any);
 
-    // Assert media group was sent combining both photos
-    assert.equal(ctx.sentMediaGroups.length, 1, 'Must send media group');
-    const mg = ctx.sentMediaGroups[0];
-    assert.equal(mg.media.length, 2);
-    assert.equal(mg.media[0].type, 'photo');
-    assert.equal(mg.media[0].media, 'photo_initial_1');
-    assert.equal(mg.media[1].type, 'photo');
-    assert.equal(mg.media[1].media, 'photo_add_1');
+    // Assert primary invoice message was edited in place via editMessageCaption
+    const editedPrimary = ctx.editedCaptions.find((e) => e.message_id === 501);
+    assert.ok(editedPrimary, 'Primary invoice message (501) must be edited in place');
 
-    // Assert caption breakdown on first photo of media group
-    const caption = mg.media[0].caption;
+    // Assert no new photo message was sent (original media preserved in place)
+    const newSentPhotos = ctx.sentMessages.filter((m) => m.photo || m.caption);
+    assert.equal(newSentPhotos.length, 0, 'No replacement photo message must be sent when editing in place succeeds');
+
+    const caption = editedPrimary.caption;
     assert.ok(caption);
-    assert.match(caption, /Registered Amount: ₩240,000/);
-    assert.match(caption, /Amount Added: ₩230,000/);
-    assert.match(caption, /Updated Invoice Total: ₩470,000/);
+    assert.match(caption, /🧾 INVOICE • #INV0001/);
+    assert.match(caption, /🏢 Meat Supplier/);
+    assert.match(caption, /📥 Original Registration:/);
+    assert.match(caption, /💵 Registered Amount:\n└─> 💰 ₩240,000/);
+    assert.match(caption, /➕ Invoice Addition/);
+    assert.match(caption, /💵 Amount Added:\n└─> 💰 ₩230,000/);
+    assert.match(caption, /📝 Note: Additional ribs/);
+    assert.match(caption, /💰 Invoice Total: ₩470,000/);
+    assert.match(caption, /⚖️ Need to Pay: ₩470,000/);
+    assert.match(caption, /📊 Status: ⏳ PENDING/);
 
-    // Assert follow-up copy account keyboard message sent
-    const keyboardMsg = ctx.sentMessages.find(
-      (m) => m.reply_markup && m.reply_markup.inline_keyboard?.length > 0
-    );
-    assert.ok(keyboardMsg, 'Copy account button must be sent');
-    assert.equal(keyboardMsg.reply_to_message_id, 8000, 'Must reply to first message of media group');
+    // Assert Copy Account Number keyboard belongs directly to primary invoice message
+    assert.ok(editedPrimary.reply_markup?.inline_keyboard?.length > 0, 'Keyboard must remain on primary message');
+    assert.equal(editedPrimary.reply_markup.inline_keyboard[0][0].text, 'Copy Account Number');
 
-    // Assert DB total updated and addition recorded
+    // Assert DB total updated and addition recorded separately
     const updatedTx = (await ctx.txRepo.findById(tx.id))!;
     assert.equal(updatedTx.amount, 470000);
-    assert.equal(updatedTx.metadata_message_id, 8000);
+    assert.equal(updatedTx.metadata_message_id, 501);
+    // Original media is preserved permanently on transaction
+    assert.equal(updatedTx.media_file_id, 'photo_initial_1');
+    assert.equal(updatedTx.media_type, 'photo');
 
     const additions = await ctx.txRepo.getAdditions(tx.id);
     assert.equal(additions.length, 1);
@@ -223,33 +231,20 @@ describe('/add Workflow Regression Suite', () => {
     assert.equal(additions[0].media_file_id, 'photo_add_1');
     assert.equal(additions[0].media_type, 'photo');
 
-    // Assert original invoice was edited with manual deletion warning and keyboard cleared
-    const editedOld = ctx.editedCaptions.find((e) => e.message_id === 501);
-    assert.ok(editedOld, 'Original invoice must be edited');
-    assert.match(editedOld.caption, /🆔 #INV0001 • 🔄 UPDATED/);
-    assert.match(editedOld.caption, /🔗 Updated Invoice: https:\/\/t\.me\/c\/123456\/8000/);
-    assert.match(editedOld.caption, /⚠️ Should be deleted manually!/);
-    assert.deepEqual(editedOld.reply_markup, { inline_keyboard: [] }, 'Keyboard must be removed');
-
     // Assert admin /add message was deleted
     assert.ok(ctx.deletedMessageIds.includes(601), 'Admin /add message must be deleted');
-
-    // Assert API call order
-    const callNames = ctx.apiCalls.map((c) => c.method);
-    const mediaGroupIdx = callNames.indexOf('sendMediaGroup');
-    const editIdx = callNames.indexOf('editMessageCaption');
-    const deleteIdx = callNames.indexOf('deleteMessage');
-    assert.ok(mediaGroupIdx < editIdx, 'sendMediaGroup must happen before editing original message');
-    assert.ok(editIdx < deleteIdx, 'editMessageCaption must happen before deleting admin message');
   });
 
-  it('2. Document invoice + document /add: creates media group album of documents', async () => {
+  it('2. Document invoice + document /add: edits primary document in place and preserves original document', async () => {
     const ctx = await setupTestContext();
 
     const tx = await ctx.txService.registerTransaction(
       String(testConfig.telegramGroupId),
       testConfig.pendingTopicId,
-      502
+      502,
+      undefined,
+      'doc_initial_1',
+      'document'
     );
     await ctx.txService.setAmount(tx.id, 100000);
     await ctx.txRepo.updateMetadataMessageId(tx.id, 502);
@@ -273,25 +268,31 @@ describe('/add Workflow Regression Suite', () => {
       },
     } as any);
 
-    assert.equal(ctx.sentMediaGroups.length, 1);
-    const mg = ctx.sentMediaGroups[0];
-    assert.equal(mg.media.length, 2);
-    assert.equal(mg.media[0].type, 'document');
-    assert.equal(mg.media[0].media, 'doc_initial_1');
-    assert.equal(mg.media[1].type, 'document');
-    assert.equal(mg.media[1].media, 'doc_add_2');
-    assert.match(mg.media[0].caption, /Updated Invoice Total: ₩150,000/);
+    const editedPrimary = ctx.editedCaptions.find((e) => e.message_id === 502);
+    assert.ok(editedPrimary, 'Primary document message must be edited in place');
+    assert.match(editedPrimary.caption, /💰 Invoice Total: ₩150,000/);
+
+    const updatedTx = (await ctx.txRepo.findById(tx.id))!;
+    assert.equal(updatedTx.media_file_id, 'doc_initial_1');
+    assert.equal(updatedTx.media_type, 'document');
+
+    const additions = await ctx.txRepo.getAdditions(tx.id);
+    assert.equal(additions.length, 1);
+    assert.equal(additions[0].media_file_id, 'doc_add_2');
 
     assert.ok(ctx.deletedMessageIds.includes(602));
   });
 
-  it('3. Mixed media: photo invoice + document /add sends updated document cleanly (Telegram forbids mixed media groups)', async () => {
+  it('3. Mixed media: photo invoice + document /add preserves original photo and stores addition document', async () => {
     const ctx = await setupTestContext();
 
     const tx = await ctx.txService.registerTransaction(
       String(testConfig.telegramGroupId),
       testConfig.pendingTopicId,
-      503
+      503,
+      undefined,
+      'photo_init',
+      'photo'
     );
     await ctx.txService.setAmount(tx.id, 100000);
     await ctx.txRepo.updateMetadataMessageId(tx.id, 503);
@@ -316,18 +317,22 @@ describe('/add Workflow Regression Suite', () => {
       },
     } as any);
 
-    // Must NOT call sendMediaGroup because Telegram rejects mixed photo+document
-    assert.equal(ctx.sentMediaGroups.length, 0);
+    // Primary photo invoice is edited in place
+    const editedPrimary = ctx.editedCaptions.find((e) => e.message_id === 503);
+    assert.ok(editedPrimary, 'Photo invoice message must be edited in place');
+    assert.match(editedPrimary.caption, /💰 Invoice Total: ₩180,000/);
 
-    // Must send updated document
-    const sentDoc = ctx.sentMessages.find(
-      (m) => m.document === 'doc_supplementary' || m.document?.file_id === 'doc_supplementary'
-    );
-    assert.ok(sentDoc, 'Must send updated document');
-    assert.match(sentDoc.caption, /Updated Invoice Total: ₩180,000/);
+    // Original media is preserved as photo
+    const updatedTx = (await ctx.txRepo.findById(tx.id))!;
+    assert.equal(updatedTx.media_file_id, 'photo_init');
+    assert.equal(updatedTx.media_type, 'photo');
 
-    // Original invoice edited and admin message deleted
-    assert.ok(ctx.editedCaptions.find((e) => e.message_id === 503));
+    // Addition document stored in additions table
+    const additions = await ctx.txRepo.getAdditions(tx.id);
+    assert.equal(additions.length, 1);
+    assert.equal(additions[0].media_file_id, 'doc_supplementary');
+    assert.equal(additions[0].media_type, 'document');
+
     assert.ok(ctx.deletedMessageIds.includes(603));
   });
 
@@ -337,7 +342,10 @@ describe('/add Workflow Regression Suite', () => {
     const tx = await ctx.txService.registerTransaction(
       String(testConfig.telegramGroupId),
       testConfig.pendingTopicId,
-      504
+      504,
+      undefined,
+      'photo_orig',
+      'photo'
     );
     await ctx.txService.setAmount(tx.id, 200000);
     await ctx.txRepo.updateMetadataMessageId(tx.id, 504);
@@ -362,16 +370,12 @@ describe('/add Workflow Regression Suite', () => {
 
     // First attempt
     await ctx.bot.handleUpdate(update as any);
-    assert.equal(ctx.sentMediaGroups.length, 1);
 
     const txAfterFirst = (await ctx.txRepo.findById(tx.id))!;
     assert.equal(txAfterFirst.amount, 300000);
 
     // Telegram retries the exact same update
     await ctx.bot.handleUpdate(update as any);
-
-    // Assert no second media group sent
-    assert.equal(ctx.sentMediaGroups.length, 1, 'Must not duplicate media group on retry');
 
     // Assert DB total unchanged
     const txAfterRetry = (await ctx.txRepo.findById(tx.id))!;
@@ -387,8 +391,13 @@ describe('/add Workflow Regression Suite', () => {
     const tx = await ctx.txService.registerTransaction(
       String(testConfig.telegramGroupId),
       testConfig.pendingTopicId,
-      505
+      505,
+      undefined,
+      'photo_orig',
+      'photo'
     );
+    const snapshot = ctx.distService.createSnapshot(ctx.distributor);
+    await ctx.txService.assignDistributor(tx.id, ctx.distributor.id, snapshot);
     await ctx.txService.setAmount(tx.id, 300000);
     await ctx.txRepo.updateMetadataMessageId(tx.id, 505);
 
@@ -431,13 +440,14 @@ describe('/add Workflow Regression Suite', () => {
     const totalPaid = await ctx.txRepo.getTotalPaid(tx.id);
     assert.equal(totalPaid, 100000, 'Total paid must remain 100k');
 
-    // Assert new invoice caption includes partial payment progress
-    const mg = ctx.sentMediaGroups[0];
-    assert.ok(mg);
-    const caption = mg.media[0].caption;
-    assert.match(caption, /Updated Invoice Total: ₩350,000/);
-    assert.match(caption, /Total Paid: ₩100,000/);
-    assert.match(caption, /⚖️ Balance Due: ₩250,000/);
+    // Assert edited invoice caption includes partial payment progress
+    const edited = ctx.editedCaptions.find((e) => e.message_id === 505);
+    assert.ok(edited);
+    const caption = edited.caption;
+    assert.match(caption, /💰 Invoice Total: ₩350,000/);
+    assert.match(caption, /💵 Total Paid: ₩100,000/);
+    assert.match(caption, /⚖️ Need to Pay: ₩250,000/);
+    assert.ok(edited.reply_markup?.inline_keyboard?.length > 0, 'Keyboard attached directly');
   });
 
   it('6. Failure safety: Telegram failure preserves source media and reports exact failure step', async () => {
@@ -446,13 +456,17 @@ describe('/add Workflow Regression Suite', () => {
     const tx = await ctx.txService.registerTransaction(
       String(testConfig.telegramGroupId),
       testConfig.pendingTopicId,
-      506
+      506,
+      undefined,
+      'photo_orig',
+      'photo'
     );
     await ctx.txService.setAmount(tx.id, 100000);
     await ctx.txRepo.updateMetadataMessageId(tx.id, 506);
 
-    // Simulate sendMediaGroup failure
-    ctx.failMethods.add('sendMediaGroup');
+    // Simulate editMessageCaption and sendPhoto failure
+    ctx.failMethods.add('editMessageCaption');
+    ctx.failMethods.add('sendPhoto');
 
     await ctx.bot.handleUpdate({
       update_id: 106,
@@ -481,7 +495,7 @@ describe('/add Workflow Regression Suite', () => {
 
     // Error reported to chat
     const errorMsg = ctx.sentMessages.find(
-      (m) => typeof m.text === 'string' && m.text.includes('Failed to create updated invoice message')
+      (m) => typeof m.text === 'string' && m.text.includes('Failed to update invoice message')
     );
     assert.ok(errorMsg, 'Error reporting exact failed step must be sent');
   });
@@ -518,5 +532,91 @@ describe('/add Workflow Regression Suite', () => {
     );
     assert.ok(rejectMsg, 'Must reject /add on PAID invoice');
     assert.equal(ctx.deletedMessageIds.includes(607), false);
+  });
+
+  it('8. Exact #INV0015 scenario: Registration ₩450,000 + /add ₩200,000 preserves original media, updates in place, keyboard attached', async () => {
+    const ctx = await setupTestContext();
+
+    // Create Koreta distributor as in production #INV0015
+    const koreta = await ctx.distService.create({
+      name: 'Koreta',
+      alias: 'koreta',
+      bankName: 'Hana Bank',
+      accountNumber: '012-345678-2341',
+      accountHolder: 'Koreta CoLtd',
+    });
+
+    // Step 1: Initial invoice registration for ₩450,000 with photo
+    const tx = await ctx.txService.registerTransaction(
+      String(testConfig.telegramGroupId),
+      testConfig.pendingTopicId,
+      901,
+      undefined,
+      'photo_invoice_12345_inv0015',
+      'photo'
+    );
+    const snapshot = ctx.distService.createSnapshot(koreta);
+    await ctx.txService.assignDistributor(tx.id, koreta.id, snapshot);
+    await ctx.txService.setAmount(tx.id, 450000);
+    await ctx.txRepo.updateMetadataMessageId(tx.id, 901);
+
+    // Step 2: Admin replies with second photo and /add 200000
+    await ctx.bot.handleUpdate({
+      update_id: 201,
+      message: {
+        message_id: 902,
+        from: { id: 111, is_bot: false },
+        chat: { id: testConfig.telegramGroupId, type: 'supergroup' },
+        message_thread_id: testConfig.pendingTopicId,
+        photo: [{ file_id: 'photo_book_cover_inv0015', width: 800, height: 600 }],
+        caption: '/add 200000',
+        reply_to_message: {
+          message_id: 901,
+          chat: { id: testConfig.telegramGroupId },
+          message_thread_id: testConfig.pendingTopicId,
+          photo: [{ file_id: 'photo_invoice_12345_inv0015', width: 800, height: 600 }],
+          caption: 'Invoice 12345',
+        },
+      },
+    } as any);
+
+    // 1. Primary invoice message edited in place
+    const editedPrimary = ctx.editedCaptions.find((e) => e.message_id === 901);
+    assert.ok(editedPrimary, 'Primary invoice message must be edited in place');
+
+    // 2. Caption includes invoice identity, distributor, action history, and financial summary
+    assert.match(editedPrimary.caption, /🧾 INVOICE • #INV0001/);
+    assert.match(editedPrimary.caption, /🏢 Koreta/);
+    assert.match(editedPrimary.caption, /💳 Hana Bank 012-345678-2341/);
+    assert.match(editedPrimary.caption, /👤 Koreta CoLtd/);
+    assert.match(editedPrimary.caption, /Original Registration:/);
+    assert.match(editedPrimary.caption, /Registered Amount:\n└─> 💰 ₩450,000/);
+    assert.match(editedPrimary.caption, /Invoice Addition/);
+    assert.match(editedPrimary.caption, /Amount Added:\n└─> 💰 ₩200,000/);
+    assert.match(editedPrimary.caption, /📊 FINANCIAL SUMMARY/);
+    assert.match(editedPrimary.caption, /💰 Invoice Total: ₩650,000/);
+    assert.match(editedPrimary.caption, /💵 Total Paid: ₩0/);
+    assert.match(editedPrimary.caption, /⚖️ Need to Pay: ₩650,000/);
+    assert.match(editedPrimary.caption, /📊 Status: ⏳ PENDING/);
+
+    // 3. Inline keyboard includes the Copy Account Number button directly on the primary message
+    assert.ok(editedPrimary.reply_markup?.inline_keyboard?.length > 0, 'Keyboard must be directly on primary message');
+    assert.equal(editedPrimary.reply_markup.inline_keyboard[0][0].text, 'Copy Account Number');
+
+    // 4. No second invoice preview or duplicate bank-information message is sent
+    const textMessages = ctx.sentMessages.filter((m) => m.text && !m.photo && !m.document);
+    assert.equal(textMessages.length, 0, 'No second invoice preview or duplicate bank-info message sent');
+
+    // 5. Database records the invoice correctly
+    const updatedTx = (await ctx.txRepo.findById(tx.id))!;
+    assert.equal(updatedTx.amount, 650000, 'DB invoice total must be 650,000');
+    assert.equal(updatedTx.status, 'PENDING');
+    assert.equal(updatedTx.media_file_id, 'photo_invoice_12345_inv0015', 'Original media preserved in DB');
+    assert.equal(updatedTx.media_type, 'photo');
+
+    const additions = await ctx.txRepo.getAdditions(tx.id);
+    assert.equal(additions.length, 1);
+    assert.equal(additions[0].amount, 200000);
+    assert.equal(additions[0].media_file_id, 'photo_book_cover_inv0015', 'Addition media preserved in additions table');
   });
 });

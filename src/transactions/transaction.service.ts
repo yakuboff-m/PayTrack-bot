@@ -5,6 +5,7 @@ import { getConfig, type Config } from '../config/config';
 import {
   buildMessageLink,
   detectMessageType,
+  extractMediaInfo,
   splitOriginalAndMetadata,
   composeMessageText,
   formatConfirmedInvoiceContent,
@@ -55,7 +56,7 @@ export type ExecuteAddAmountResult =
       newTotalAmount: number;
       newInvoiceMessageId: number;
       updatedInvoiceUrl: string;
-      supersededInvoiceMessageId: number;
+      supersededInvoiceMessageId?: number;
     }
   | {
       success: false;
@@ -108,6 +109,8 @@ export class TransactionService {
       historyMessageId: row.history_message_id,
       metadataMessageId: row.metadata_message_id,
       notes: row.notes ? JSON.parse(row.notes) : [],
+      mediaFileId: row.media_file_id ?? null,
+      mediaType: row.media_type ?? null,
       createdAt: row.created_at,
     };
   }
@@ -118,7 +121,9 @@ export class TransactionService {
     chatId: string,
     topicId: number,
     messageId: number,
-    notes?: InvoiceNote[]
+    notes?: InvoiceNote[],
+    mediaFileId?: string | null,
+    mediaType?: string | null
   ): Promise<Transaction> {
     if (
       messageId === topicId ||
@@ -131,7 +136,9 @@ export class TransactionService {
       topicId,
       messageId,
       nowISO(),
-      notes && notes.length > 0 ? JSON.stringify(notes) : undefined
+      notes && notes.length > 0 ? JSON.stringify(notes) : undefined,
+      mediaFileId ?? null,
+      mediaType ?? null
     );
     return this.toDomain(row);
   }
@@ -144,6 +151,8 @@ export class TransactionService {
     distributorSnapshot?: DistributorSnapshot | null;
     amount?: number | null;
     notes?: InvoiceNote[];
+    mediaFileId?: string | null;
+    mediaType?: string | null;
   }): Promise<Transaction> {
     if (
       params.messageId === params.pendingTopicId ||
@@ -160,6 +169,8 @@ export class TransactionService {
       amount: params.amount ?? null,
       receivedAt: nowISO(),
       notes: params.notes && params.notes.length > 0 ? JSON.stringify(params.notes) : null,
+      mediaFileId: params.mediaFileId ?? null,
+      mediaType: params.mediaType ?? null,
     });
     return this.toDomain(row);
   }
@@ -400,8 +411,30 @@ export class TransactionService {
 
     // Persist the bot message ID
     await this.repo.updateMetadataMessageId(transaction.id, botMsg.message_id);
+    transaction.metadataMessageId = botMsg.message_id;
+
+    // Persist media file id and media type if not already stored
+    let savedFileId: string | null = null;
+    if (msgType === 'photo' && repliedMessage.photo && repliedMessage.photo.length > 0) {
+      savedFileId = repliedMessage.photo[repliedMessage.photo.length - 1].file_id;
+    } else if (msgType === 'document' && repliedMessage.document) {
+      savedFileId = repliedMessage.document.file_id;
+    }
+    if (savedFileId && (!transaction.mediaFileId || !transaction.mediaType)) {
+      await this.repo.updateMedia(transaction.id, savedFileId, msgType);
+      transaction.mediaFileId = savedFileId;
+      transaction.mediaType = msgType;
+    }
 
     return { botMessageId: botMsg.message_id };
+  }
+
+  async updateTransactionMedia(
+    id: number,
+    mediaFileId: string | null,
+    mediaType: string | null
+  ): Promise<void> {
+    return this.repo.updateMedia(id, mediaFileId, mediaType);
   }
 
   /**
@@ -1384,12 +1417,20 @@ export class TransactionService {
           : null;
       const addDoc = addMessage.document?.file_id ?? null;
 
-      const prevPhotos = previousAdditions
-        .filter((a) => a.media_type === 'photo' && a.media_file_id)
-        .map((a) => a.media_file_id as string);
-      const prevDocs = previousAdditions
-        .filter((a) => a.media_type === 'document' && a.media_file_id)
-        .map((a) => a.media_file_id as string);
+      // Ensure original invoice media identity is preserved and persisted
+      let originalMediaFileId = transaction.mediaFileId;
+      let originalMediaType = transaction.mediaType;
+
+      if (!originalMediaFileId || !originalMediaType) {
+        const repliedMedia = extractMediaInfo(repliedMessage);
+        if (repliedMedia.mediaFileId) {
+          originalMediaFileId = repliedMedia.mediaFileId;
+          originalMediaType = repliedMedia.mediaType;
+          await this.repo.updateMedia(transaction.id, originalMediaFileId, originalMediaType);
+          transaction.mediaFileId = originalMediaFileId;
+          transaction.mediaType = originalMediaType;
+        }
+      }
 
       // Compose caption
       const repliedText = repliedMessage.text ?? repliedMessage.caption ?? '';
@@ -1411,91 +1452,75 @@ export class TransactionService {
         maxCaptionLength: MAX_CAPTION_LENGTH,
       });
 
-      // Group photos or documents if Telegram API permits
-      const allPhotos = Array.from(
-        new Set([repliedPhoto, ...prevPhotos, addPhoto].filter((p): p is string => Boolean(p)))
-      );
-      const allDocs = Array.from(
-        new Set([repliedDoc, ...prevDocs, addDoc].filter((d): d is string => Boolean(d)))
-      );
-
-      const canGroupPhotos =
-        !repliedDoc && !addDoc && prevDocs.length === 0 && allPhotos.length >= 2;
-      const canGroupDocs =
-        !repliedPhoto && !addPhoto && prevPhotos.length === 0 && allDocs.length >= 2;
+      const targetMessageId = transaction.metadataMessageId ?? repliedMessage.message_id;
+      const keyboard = transaction.distributorSnapshot?.accountNumber
+        ? copyAccountKeyboard(transaction.distributorSnapshot.accountNumber)
+        : undefined;
 
       let newInvoiceMsg: Message;
-      let keyboardMsg: Message | undefined;
+      let editSucceeded = false;
+      const isMedia =
+        originalMediaType === 'photo' ||
+        originalMediaType === 'document' ||
+        Boolean(repliedMessage.photo || repliedMessage.document);
 
-      // 4. Create new updated invoice record/message immediately
-      try {
-        if (canGroupPhotos) {
-          const mediaGroup = allPhotos.slice(0, 10).map((fileId, idx) => ({
-            type: 'photo' as const,
-            media: fileId,
-            caption: idx === 0 ? safeCaption : undefined,
-          }));
-          const sent = await api.sendMediaGroup(chatId, mediaGroup, {
-            message_thread_id: pendingTopicId,
+      // 4. Update the primary invoice message's caption and keyboard in place
+      if (isMedia) {
+        try {
+          await api.editMessageCaption(chatId, targetMessageId, {
+            caption: safeCaption,
+            reply_markup: keyboard,
           });
-          newInvoiceMsg = sent[0];
-          if (transaction.distributorSnapshot?.accountNumber) {
+          editSucceeded = true;
+        } catch (capErr: unknown) {
+          if (isNoTextMessageError(capErr)) {
             try {
-              keyboardMsg = await api.sendMessage(
-                chatId,
-                `💳 ${transaction.distributorSnapshot.name} • ${transaction.distributorSnapshot.bankName} ${transaction.distributorSnapshot.accountNumber}`,
-                {
-                  message_thread_id: pendingTopicId,
-                  reply_to_message_id: newInvoiceMsg.message_id,
-                  reply_markup: copyAccountKeyboard(transaction.distributorSnapshot.accountNumber),
-                }
-              );
-            } catch (kErr) {
-              console.warn('Failed to send follow-up copy account keyboard for media group:', kErr);
+              await api.editMessageText(chatId, targetMessageId, safeCaption, {
+                reply_markup: keyboard,
+              });
+              editSucceeded = true;
+            } catch {
+              /* fall through to re-send fallback */
             }
           }
-        } else if (canGroupDocs) {
-          const mediaGroup = allDocs.slice(0, 10).map((fileId, idx) => ({
-            type: 'document' as const,
-            media: fileId,
-            caption: idx === 0 ? safeCaption : undefined,
-          }));
-          const sent = await api.sendMediaGroup(chatId, mediaGroup, {
-            message_thread_id: pendingTopicId,
+        }
+      } else {
+        try {
+          await api.editMessageText(chatId, targetMessageId, safeCaption, {
+            reply_markup: keyboard,
           });
-          newInvoiceMsg = sent[0];
-          if (transaction.distributorSnapshot?.accountNumber) {
+          editSucceeded = true;
+        } catch (txtErr: unknown) {
+          if (isNoTextMessageError(txtErr)) {
             try {
-              keyboardMsg = await api.sendMessage(
-                chatId,
-                `💳 ${transaction.distributorSnapshot.name} • ${transaction.distributorSnapshot.bankName} ${transaction.distributorSnapshot.accountNumber}`,
-                {
-                  message_thread_id: pendingTopicId,
-                  reply_to_message_id: newInvoiceMsg.message_id,
-                  reply_markup: copyAccountKeyboard(transaction.distributorSnapshot.accountNumber),
-                }
-              );
-            } catch (kErr) {
-              console.warn('Failed to send follow-up copy account keyboard for media group:', kErr);
+              await api.editMessageCaption(chatId, targetMessageId, {
+                caption: safeCaption,
+                reply_markup: keyboard,
+              });
+              editSucceeded = true;
+            } catch {
+              /* fall through to re-send fallback */
             }
           }
-        } else {
-          // Single media or mixed media (Telegram doesn't allow photo+doc in same mediaGroup)
-          const mediaFileId = addPhoto ?? addDoc ?? repliedPhoto ?? repliedDoc;
-          const isPhoto = Boolean(addPhoto || (!addDoc && repliedPhoto));
-          const isDoc = Boolean(addDoc || (!addPhoto && repliedDoc));
-          const keyboard = transaction.distributorSnapshot?.accountNumber
-            ? copyAccountKeyboard(transaction.distributorSnapshot.accountNumber)
-            : undefined;
+        }
+      }
 
-          if (isPhoto && mediaFileId) {
-            newInvoiceMsg = await api.sendPhoto(chatId, mediaFileId, {
+      if (editSucceeded) {
+        newInvoiceMsg = {
+          ...repliedMessage,
+          message_id: targetMessageId,
+        } as Message;
+      } else {
+        // Fallback migration strategy: Re-send preserving the ORIGINAL media
+        try {
+          if (originalMediaType === 'photo' && originalMediaFileId) {
+            newInvoiceMsg = await api.sendPhoto(chatId, originalMediaFileId, {
               caption: safeCaption,
               message_thread_id: pendingTopicId,
               reply_markup: keyboard,
             });
-          } else if (isDoc && mediaFileId) {
-            newInvoiceMsg = await api.sendDocument(chatId, mediaFileId, {
+          } else if (originalMediaType === 'document' && originalMediaFileId) {
+            newInvoiceMsg = await api.sendDocument(chatId, originalMediaFileId, {
               caption: safeCaption,
               message_thread_id: pendingTopicId,
               reply_markup: keyboard,
@@ -1506,13 +1531,25 @@ export class TransactionService {
               reply_markup: keyboard,
             });
           }
+
+          await this.repo.updateMetadataMessageId(transaction.id, newInvoiceMsg.message_id);
+          transaction.metadataMessageId = newInvoiceMsg.message_id;
+
+          // Attempt to delete the old uneditable message
+          if (targetMessageId !== newInvoiceMsg.message_id) {
+            try {
+              await api.deleteMessage(chatId, targetMessageId);
+            } catch {
+              /* best effort */
+            }
+          }
+        } catch (sendErr) {
+          return {
+            success: false,
+            error: `Failed to update invoice message: ${(sendErr as Error).message}`,
+            failedStep: 'create_new_invoice',
+          };
         }
-      } catch (sendErr) {
-        return {
-          success: false,
-          error: `Failed to create updated invoice message: ${(sendErr as Error).message}`,
-          failedStep: 'create_new_invoice',
-        };
       }
 
       // 5. Save updated transaction and addition record in database
@@ -1527,7 +1564,6 @@ export class TransactionService {
           addPhoto ? 'photo' : addDoc ? 'document' : null,
           optionalNote ?? null
         );
-        await this.repo.updateMetadataMessageId(transaction.id, newInvoiceMsg.message_id);
 
         if (optionalNote) {
           const currentNotes = transaction.notes ?? [];
@@ -1538,15 +1574,6 @@ export class TransactionService {
           await this.repo.updateNotes(transaction.id, JSON.stringify(currentNotes));
         }
       } catch (dbErr) {
-        // Rollback created invoice message on DB failure
-        try {
-          await api.deleteMessage(chatId, newInvoiceMsg.message_id);
-          if (keyboardMsg) {
-            await api.deleteMessage(chatId, keyboardMsg.message_id);
-          }
-        } catch {
-          /* best effort */
-        }
         return {
           success: false,
           error: `Failed to save updated transaction record: ${(dbErr as Error).message}`,
@@ -1554,78 +1581,22 @@ export class TransactionService {
         };
       }
 
-      // 6. Edit original invoice message in Pending topic
-      const targetMessageIds = Array.from(
-        new Set(
-          [transaction.metadataMessageId, repliedMessage.message_id].filter(
-            (id): id is number => Boolean(id) && id !== newInvoiceMsg.message_id
-          )
-        )
-      );
-
-      const updatedInvoiceUrl = buildMessageLink(chatId, newInvoiceMsg.message_id);
-      const supersededCaption = formatSupersededInvoiceCaption(
-        transaction.id,
-        updatedInvoiceUrl
-      );
-
-      try {
-        for (const targetId of targetMessageIds) {
-          const isRepliedMedia = Boolean(repliedMessage.photo || repliedMessage.document);
-          if (isRepliedMedia) {
-            try {
-              await api.editMessageCaption(chatId, targetId, {
-                caption: supersededCaption,
-                reply_markup: { inline_keyboard: [] },
-              });
-            } catch (capErr: unknown) {
-              if (isNoTextMessageError(capErr)) {
-                await api.editMessageText(chatId, targetId, supersededCaption, {
-                  reply_markup: { inline_keyboard: [] },
-                });
-              } else {
-                throw capErr;
-              }
-            }
-          } else {
-            try {
-              await api.editMessageText(chatId, targetId, supersededCaption, {
-                reply_markup: { inline_keyboard: [] },
-              });
-            } catch (txtErr: unknown) {
-              if (isNoTextMessageError(txtErr)) {
-                await api.editMessageCaption(chatId, targetId, {
-                  caption: supersededCaption,
-                  reply_markup: { inline_keyboard: [] },
-                });
-              } else {
-                throw txtErr;
-              }
-            }
-          }
-        }
-      } catch (editErr) {
-        return {
-          success: false,
-          error: `Failed to edit original invoice message: ${(editErr as Error).message}`,
-          failedStep: 'edit_original_invoice',
-        };
-      }
-
-      // 7. Delete admin's /add message containing the additional invoice media
+      // 6. Delete admin's /add message
       try {
         await api.deleteMessage(chatId, addMessage.message_id);
       } catch (delErr) {
         console.warn(`Failed to delete admin /add message: ${(delErr as Error).message}`);
       }
 
+      const updatedInvoiceUrl = buildMessageLink(chatId, newInvoiceMsg.message_id);
       return {
         success: true,
         transactionId: transaction.id,
         newTotalAmount,
         newInvoiceMessageId: newInvoiceMsg.message_id,
         updatedInvoiceUrl,
-        supersededInvoiceMessageId: targetMessageIds[0] ?? repliedMessage.message_id,
+        supersededInvoiceMessageId:
+          newInvoiceMsg.message_id !== targetMessageId ? targetMessageId : undefined,
       };
     } finally {
       processingLocks.delete(transaction.id);

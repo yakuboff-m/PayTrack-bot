@@ -184,19 +184,19 @@ describe('Invoice Caption, Amount Breakdown, and Append-Only Action History', ()
     // Section A: Header
     assert.match(caption, /🧾 INVOICE • #INV0001/);
     assert.match(caption, /🏢 Meat Wholesaler Co/);
-    assert.match(caption, /🏦 Shinhan Bank 110-123-456789/);
+    assert.match(caption, /💳 Shinhan Bank 110-123-456789/);
 
     // Section B: Action History
     assert.match(caption, /📜 ACTION HISTORY/);
-    assert.match(caption, /📥 Original Registration ·/);
-    assert.match(caption, /💵 Registered Amount: ₩1,431,216/);
+    assert.match(caption, /📥 Original Registration:/);
+    assert.match(caption, /💵 Registered Amount:\n└─> 💰 ₩1,431,216/);
 
     // Section C: Financial Summary
     assert.match(caption, /📊 FINANCIAL SUMMARY/);
     assert.match(caption, /💰 Invoice Total: ₩1,431,216/);
     assert.match(caption, /💵 Total Paid: ₩0/);
-    assert.match(caption, /⚖️ Balance Due: ₩1,431,216/);
-    assert.match(caption, /⏳ Status: ⏳ PENDING/);
+    assert.match(caption, /⚖️ Need to Pay: ₩1,431,216/);
+    assert.match(caption, /📊 Status: ⏳ PENDING/);
   });
 
   // ─── 2. Registration plus one addition ────────────────────
@@ -222,14 +222,14 @@ describe('Invoice Caption, Amount Breakdown, and Append-Only Action History', ()
     const caption = await ctx.txService.renderInvoiceCaptionForTransaction(tx.id);
 
     // Distinct amounts in history
-    assert.match(caption, /💵 Registered Amount: ₩1,431,216/);
-    assert.match(caption, /➕ Invoice Addition ·/);
-    assert.match(caption, /💵 Amount Added: ₩200,000/);
+    assert.match(caption, /💵 Registered Amount:\n└─> 💰 ₩1,431,216/);
+    assert.match(caption, /➕ Invoice Addition/);
+    assert.match(caption, /💵 Amount Added:\n└─> 💰 ₩200,000/);
     assert.match(caption, /📝 Note: Extra beef ribs/);
 
     // Summary reflects updated invoice total
-    assert.match(caption, /💰 Updated Invoice Total: ₩1,631,216/);
-    assert.match(caption, /⚖️ Balance Due: ₩1,631,216/);
+    assert.match(caption, /💰 Invoice Total: ₩1,631,216/);
+    assert.match(caption, /⚖️ Need to Pay: ₩1,631,216/);
   });
 
   // ─── 3. Registration plus multiple additions ──────────────
@@ -247,10 +247,10 @@ describe('Invoice Caption, Amount Breakdown, and Append-Only Action History', ()
 
     const caption = await ctx.txService.renderInvoiceCaptionForTransaction(tx.id);
 
-    assert.match(caption, /💵 Registered Amount: ₩100,000/);
-    assert.match(caption, /💵 Amount Added: ₩50,000/);
-    assert.match(caption, /💵 Amount Added: ₩30,000/);
-    assert.match(caption, /💰 Updated Invoice Total: ₩180,000/);
+    assert.match(caption, /💵 Registered Amount:\n└─> 💰 ₩100,000/);
+    assert.match(caption, /💵 Amount Added:\n└─> 💰 ₩50,000/);
+    assert.match(caption, /💵 Amount Added:\n└─> 💰 ₩30,000/);
+    assert.match(caption, /💰 Invoice Total: ₩180,000/);
   });
 
   // ─── 4. Exact Reproduction Scenario ───────────────────────
@@ -350,24 +350,24 @@ describe('Invoice Caption, Amount Breakdown, and Append-Only Action History', ()
 
     // Assert exact required breakdown:
     // Original registered amount: ₩1,431,216
-    assert.match(finalCaption, /💵 Registered Amount: ₩1,431,216/);
+    assert.match(finalCaption, /💵 Registered Amount:\n└─> 💰 ₩1,431,216/);
     // Addition: ₩200,000
-    assert.match(finalCaption, /➕ Invoice Addition ·/);
-    assert.match(finalCaption, /💵 Amount Added: ₩200,000/);
+    assert.match(finalCaption, /➕ Invoice Addition/);
+    assert.match(finalCaption, /💵 Amount Added:\n└─> 💰 ₩200,000/);
     // Partial payment: ₩100,000
-    assert.match(finalCaption, /💸 Partial payment ·/);
-    assert.match(finalCaption, /💵 Amount received: ₩100,000/);
+    assert.match(finalCaption, /➖ Partial payment/);
+    assert.match(finalCaption, /💵 Amount paid:\n└─> 💰 ₩100,000/);
     // Direct link to Confirmed receipt
-    assert.match(finalCaption, /🧾 Receipt: \[View payment receipt\]\(https:\/\/t\.me\/c\/123456\/\d+\)/);
+    assert.match(finalCaption, /🧾 Receipt URL:\n└─> 🔗 https:\/\/t\.me\/c\/123456\/\d+/);
 
     // Financial Summary:
     // Current invoice total: ₩1,631,216
-    assert.match(finalCaption, /💰 Updated Invoice Total: ₩1,631,216/);
+    assert.match(finalCaption, /💰 Invoice Total: ₩1,631,216/);
     // Total paid: ₩100,000
     assert.match(finalCaption, /💵 Total Paid: ₩100,000/);
     // Remaining balance: ₩1,531,216
-    assert.match(finalCaption, /⚖️ Balance Due: ₩1,531,216/);
-    assert.match(finalCaption, /⏳ Status: ⏳ PARTIALLY PAID/);
+    assert.match(finalCaption, /⚖️ Need to Pay: ₩1,531,216/);
+    assert.match(finalCaption, /📊 Status: ⏳ PARTIALLY PAID/);
   });
 
   // ─── 5. Multiple partial payments with distinct Confirmed receipt URLs ────
@@ -433,12 +433,12 @@ describe('Invoice Caption, Amount Breakdown, and Append-Only Action History', ()
     const caption = await ctx.txService.renderInvoiceCaptionForTransaction(tx.id);
 
     // Assert both receipt links appear in caption
-    assert.match(caption, new RegExp(`\\[View payment receipt\\]\\(${payments[0].receipt_url}\\)`));
-    assert.match(caption, new RegExp(`\\[View payment receipt\\]\\(${payments[1].receipt_url}\\)`));
+    assert.match(caption, new RegExp(`🧾 Receipt URL:\n└─> 🔗 ${payments[0].receipt_url}`));
+    assert.match(caption, new RegExp(`🧾 Receipt URL:\n└─> 🔗 ${payments[1].receipt_url}`));
 
     // Assert totals
     assert.match(caption, /💵 Total Paid: ₩250,000/);
-    assert.match(caption, /⚖️ Balance Due: ₩250,000/);
+    assert.match(caption, /⚖️ Need to Pay: ₩250,000/);
   });
 
   // ─── 6. Final payment of remaining balance ────────────────
@@ -497,11 +497,11 @@ describe('Invoice Caption, Amount Breakdown, and Append-Only Action History', ()
     assert.equal(totalPaid, 200000);
 
     const caption = await ctx.txService.renderInvoiceCaptionForTransaction(tx.id);
-    assert.match(caption, /✅ Full payment ·/);
-    assert.match(caption, /💵 Amount received: ₩150,000/);
+    assert.match(caption, /✅ Full payment/);
+    assert.match(caption, /💵 Amount paid:\n└─> 💰 ₩150,000/);
     assert.match(caption, /💵 Total Paid: ₩200,000/);
-    assert.match(caption, /⚖️ Balance Due: ₩0/);
-    assert.match(caption, /⏳ Status: ✅ PAID/);
+    assert.match(caption, /⚖️ Need to Pay: ₩0/);
+    assert.match(caption, /📊 Status: ✅ PAID/);
   });
 
   // ─── 7. Repeated /add or payment retry does not duplicate ─
@@ -576,13 +576,13 @@ describe('Invoice Caption, Amount Breakdown, and Append-Only Action History', ()
     // Rebuild caption from scratch purely via durable DB records
     const caption = await ctx.txService.renderInvoiceCaptionForTransaction(tx.id);
 
-    assert.match(caption, /💵 Registered Amount: ₩300,000/);
-    assert.match(caption, /💵 Amount Added: ₩100,000/);
-    assert.match(caption, /💵 Amount received: ₩150,000/);
-    assert.match(caption, /🧾 Receipt: \[View payment receipt\]\(https:\/\/t\.me\/c\/123456\/9901\)/);
-    assert.match(caption, /💰 Updated Invoice Total: ₩400,000/);
+    assert.match(caption, /💵 Registered Amount:\n└─> 💰 ₩300,000/);
+    assert.match(caption, /💵 Amount Added:\n└─> 💰 ₩100,000/);
+    assert.match(caption, /💵 Amount paid:\n└─> 💰 ₩150,000/);
+    assert.match(caption, /🧾 Receipt URL:\n└─> 🔗 https:\/\/t\.me\/c\/123456\/9901/);
+    assert.match(caption, /💰 Invoice Total: ₩400,000/);
     assert.match(caption, /💵 Total Paid: ₩150,000/);
-    assert.match(caption, /⚖️ Balance Due: ₩250,000/);
+    assert.match(caption, /⚖️ Need to Pay: ₩250,000/);
   });
 
   // ─── 9. Caption length overflow compaction ────────────────
@@ -618,8 +618,8 @@ describe('Invoice Caption, Amount Breakdown, and Append-Only Action History', ()
     assert.match(caption, /🧾 INVOICE • #INV0999/);
 
     // Original Registration must be preserved
-    assert.match(caption, /📥 Original Registration ·/);
-    assert.match(caption, /💵 Registered Amount: ₩500,000/);
+    assert.match(caption, /📥 Original Registration:/);
+    assert.match(caption, /💵 Registered Amount:\n└─> 💰 ₩500,000/);
 
     // Overflow indicator must show hidden events
     assert.match(caption, /\.\.\. \(\d+ earlier events preserved in history\) \.\.\./);
@@ -630,9 +630,9 @@ describe('Invoice Caption, Amount Breakdown, and Append-Only Action History', ()
     const totalPaid = payments.reduce((s, p) => s + p.amount, 0);
     const expectedBalance = expectedTotal - totalPaid;
 
-    assert.match(caption, new RegExp(`Updated Invoice Total: ₩${expectedTotal.toLocaleString()}`));
+    assert.match(caption, new RegExp(`Invoice Total: ₩${expectedTotal.toLocaleString()}`));
     assert.match(caption, new RegExp(`Total Paid: ₩${totalPaid.toLocaleString()}`));
-    assert.match(caption, new RegExp(`Balance Due: ₩${expectedBalance.toLocaleString()}`));
+    assert.match(caption, new RegExp(`Need to Pay: ₩${expectedBalance.toLocaleString()}`));
   });
 
   // ─── 10. Existing invoice and receipt media preserved ─────

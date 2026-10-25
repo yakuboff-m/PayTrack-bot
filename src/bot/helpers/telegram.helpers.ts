@@ -22,6 +22,29 @@ export function detectMessageType(msg: Message): 'photo' | 'document' | 'text' {
 }
 
 /**
+ * Extracts media file ID and type from a Telegram message if present.
+ */
+export function extractMediaInfo(msg?: Message | null): {
+  mediaFileId: string | null;
+  mediaType: 'photo' | 'document' | null;
+} {
+  if (!msg) return { mediaFileId: null, mediaType: null };
+  if (msg.photo && msg.photo.length > 0) {
+    return {
+      mediaFileId: msg.photo[msg.photo.length - 1].file_id,
+      mediaType: 'photo',
+    };
+  }
+  if (msg.document) {
+    return {
+      mediaFileId: msg.document.file_id,
+      mediaType: 'document',
+    };
+  }
+  return { mediaFileId: null, mediaType: null };
+}
+
+/**
  * Gets the user-visible text content of a message (text or caption).
  */
 export function getMessageText(msg: Message): string | undefined {

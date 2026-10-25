@@ -201,8 +201,7 @@ describe('PayTrack Bot /note Feature Test Suite', () => {
       // Verify message was re-sent as bot with notes displayed
       assert.equal(sentMessages.length, 1);
       assert.match(sentMessages[0].text, /Beef tenderloin 50kg/);
-      assert.match(sentMessages[0].text, /📝 NOTES:/);
-      assert.match(sentMessages[0].text, /Initial batch approved/);
+      assert.match(sentMessages[0].text, /📝 Note: Initial batch approved/);
     });
 
     // 2. Registering an invoice without a note
@@ -326,8 +325,8 @@ describe('PayTrack Bot /note Feature Test Suite', () => {
       assert.equal(notes[1].text, 'Second note added later');
 
       assert.equal(editedMessages.length, 1);
-      assert.match(editedMessages[0].text, /• 22 Oct, 10:30 — First note/);
-      assert.match(editedMessages[0].text, /Second note added later/);
+      assert.match(editedMessages[0].text, /📝 Note: First note/);
+      assert.match(editedMessages[0].text, /📝 Note: Second note added later/);
     });
 
     // 5. Rejecting /note without a valid invoice reply

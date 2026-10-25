@@ -12,6 +12,7 @@ import {
   isReply,
   isTopicServiceMessage,
   getEffectiveRepliedMessage,
+  extractMediaInfo,
   METADATA_SEPARATOR,
 } from '../helpers/telegram.helpers';
 import {
@@ -69,11 +70,14 @@ export function registerTransactionHandler(
       : [];
 
     try {
+      const mediaInfo = extractMediaInfo(msg);
       const tx = await transactionService.registerTransaction(
         chatId,
         config.pendingTopicId,
         msg.message_id,
-        initialNotes.length > 0 ? initialNotes : undefined
+        initialNotes.length > 0 ? initialNotes : undefined,
+        mediaInfo.mediaFileId,
+        mediaInfo.mediaType
       );
       console.log(`📝 Auto-registered transaction: message ${msg.message_id}`);
 
@@ -200,11 +204,14 @@ export function registerTransactionHandler(
 
         let transaction;
         try {
+          const mediaInfo = extractMediaInfo(msg);
           transaction = await transactionService.registerTransaction(
             chatId,
             config.pendingTopicId,
             msg.message_id,
-            initialNotes.length > 0 ? initialNotes : undefined
+            initialNotes.length > 0 ? initialNotes : undefined,
+            mediaInfo.mediaFileId,
+            mediaInfo.mediaType
           );
         } catch (err: unknown) {
           const errorMsg = (err as Error).message || '';
@@ -253,13 +260,17 @@ export function registerTransactionHandler(
       }
 
       // Find transaction (check both original and bot message IDs)
+      const repliedMedia = extractMediaInfo(repliedMsg);
       let transaction = await transactionService.findByAnyMessageId(chatId, repliedMsg.message_id);
       if (!transaction) {
         try {
           transaction = await transactionService.registerTransaction(
             chatId,
             config.pendingTopicId,
-            repliedMsg.message_id
+            repliedMsg.message_id,
+            undefined,
+            repliedMedia.mediaFileId,
+            repliedMedia.mediaType
           );
         } catch {
           await ctx.reply('❌ Could not find or register this transaction.', {
@@ -267,6 +278,14 @@ export function registerTransactionHandler(
           });
           return;
         }
+      } else if (!transaction.mediaFileId && repliedMedia.mediaFileId) {
+        await transactionService.updateTransactionMedia(
+          transaction.id,
+          repliedMedia.mediaFileId,
+          repliedMedia.mediaType
+        );
+        transaction.mediaFileId = repliedMedia.mediaFileId;
+        transaction.mediaType = repliedMedia.mediaType;
       }
 
       if (transaction.status !== 'PENDING') {

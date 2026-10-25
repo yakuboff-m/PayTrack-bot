@@ -14,12 +14,14 @@ export class TransactionRepository {
     topicId: number,
     messageId: number,
     receivedAt: string,
-    notes?: string
+    notes?: string,
+    mediaFileId?: string | null,
+    mediaType?: string | null
   ): Promise<TransactionRow> {
     const result = await this.db.exec(
-      `INSERT INTO transactions (telegram_chat_id, pending_topic_id, original_message_id, received_at, notes)
-       VALUES (?, ?, ?, ?, ?)`,
-      [chatId, topicId, messageId, receivedAt, notes ?? '[]']
+      `INSERT INTO transactions (telegram_chat_id, pending_topic_id, original_message_id, received_at, notes, media_file_id, media_type)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [chatId, topicId, messageId, receivedAt, notes ?? '[]', mediaFileId ?? null, mediaType ?? null]
     );
     const created = await this.findById(result.lastInsertRowid as number);
     if (!created) {
@@ -37,16 +39,20 @@ export class TransactionRepository {
     amount?: number | null;
     receivedAt: string;
     notes?: string | null;
+    mediaFileId?: string | null;
+    mediaType?: string | null;
   }): Promise<TransactionRow> {
     if (params.id) {
       await this.db.exec(
-        `INSERT INTO transactions (id, telegram_chat_id, pending_topic_id, original_message_id, metadata_message_id, distributor_snapshot, initial_amount, amount, received_at, notes)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO transactions (id, telegram_chat_id, pending_topic_id, original_message_id, metadata_message_id, distributor_snapshot, initial_amount, amount, received_at, notes, media_file_id, media_type)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            metadata_message_id = COALESCE(metadata_message_id, excluded.metadata_message_id),
            distributor_snapshot = COALESCE(distributor_snapshot, excluded.distributor_snapshot),
            initial_amount = COALESCE(initial_amount, excluded.initial_amount),
-           amount = COALESCE(amount, excluded.amount)`,
+           amount = COALESCE(amount, excluded.amount),
+           media_file_id = COALESCE(media_file_id, excluded.media_file_id),
+           media_type = COALESCE(media_type, excluded.media_type)`,
         [
           params.id,
           params.chatId,
@@ -58,6 +64,8 @@ export class TransactionRepository {
           params.amount ?? null,
           params.receivedAt,
           params.notes ?? null,
+          params.mediaFileId ?? null,
+          params.mediaType ?? null,
         ]
       );
       const row = await this.findById(params.id);
@@ -68,7 +76,9 @@ export class TransactionRepository {
         params.pendingTopicId,
         params.messageId,
         params.receivedAt,
-        params.notes ?? undefined
+        params.notes ?? undefined,
+        params.mediaFileId ?? null,
+        params.mediaType ?? null
       );
     }
   }
@@ -307,6 +317,13 @@ export class TransactionRepository {
     await this.db.exec(
       'UPDATE transactions SET metadata_message_id = ? WHERE id = ?',
       [metadataMessageId, id]
+    );
+  }
+
+  async updateMedia(id: number, mediaFileId: string | null, mediaType: string | null): Promise<void> {
+    await this.db.exec(
+      'UPDATE transactions SET media_file_id = ?, media_type = ? WHERE id = ?',
+      [mediaFileId, mediaType, id]
     );
   }
 

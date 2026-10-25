@@ -30,6 +30,8 @@ CREATE TABLE IF NOT EXISTS transactions (
   history_message_id      INTEGER,
   metadata_message_id     INTEGER,
   notes                   TEXT DEFAULT '[]',
+  media_file_id           TEXT,
+  media_type              TEXT,
   created_at              TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE(telegram_chat_id, original_message_id),
   FOREIGN KEY (distributor_id) REFERENCES distributors(id) ON DELETE SET NULL
