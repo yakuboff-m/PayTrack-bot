@@ -5,3 +5,4 @@ data/
 .env.example
 *.js.map
 *.d.ts
+.wrangler/

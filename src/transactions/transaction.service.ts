@@ -7,10 +7,8 @@ import {
   detectMessageType,
   splitOriginalAndMetadata,
   composeMessageText,
-  appendManualDeletionNotice,
   formatConfirmedInvoiceContent,
   splitTextMessage,
-  MANUAL_DELETION_NOTICE,
   MAX_CAPTION_LENGTH,
   MAX_TEXT_LENGTH,
   isNoTextMessageError,
@@ -20,6 +18,8 @@ import {
   formatHistoryRecord,
   buildMetadataBlock,
   formatInvoiceId,
+  formatCleanedPendingInvoiceCaption,
+  parsePaidCommandPayload,
   nowISO,
 } from '../bot/helpers/format.helpers';
 import { copyAccountKeyboard } from '../bot/keyboards/keyboards';
@@ -29,6 +29,7 @@ import type {
   DistributorSnapshot,
   ConfirmationResult,
   InvoiceNote,
+  TransactionStatus,
 } from '../types';
 
 /**
@@ -457,7 +458,9 @@ export class TransactionService {
     transaction: Transaction,
     commandMessageId: number,
     invoiceMsg?: Message,
-    paymentEvidenceMsg?: Message
+    paymentEvidenceMsg?: Message,
+    paymentAmount?: number | null,
+    userNote?: string | null
   ): Promise<ConfirmationResult> {
     const config = this.getEffectiveConfig();
     const chatId = config.telegramGroupId;
@@ -472,6 +475,34 @@ export class TransactionService {
       };
     }
 
+    // ── Check for duplicate/retried update (Idempotency) ────────────
+    const paymentMsgId = paymentEvidenceMsg?.message_id ?? commandMessageId;
+    if (paymentMsgId && typeof this.repo.findPaymentByMessageId === 'function') {
+      const existingPayment = await this.repo.findPaymentByMessageId(transaction.id, paymentMsgId);
+      if (existingPayment) {
+        const totalPaid =
+          typeof this.repo.getTotalPaid === 'function'
+            ? await this.repo.getTotalPaid(transaction.id)
+            : existingPayment.amount;
+        const remaining =
+          transaction.amount !== null ? Math.max(0, transaction.amount - totalPaid) : 0;
+        return {
+          success: true,
+          confirmationUrl:
+            transaction.confirmationUrl ??
+            (transaction.confirmationMessageId
+              ? buildMessageLink(chatId, transaction.confirmationMessageId)
+              : undefined),
+          confirmedMessageId: transaction.confirmationMessageId ?? undefined,
+          historyMessageId: transaction.historyMessageId ?? undefined,
+          status: transaction.status,
+          paidAmount: existingPayment.amount,
+          cumulativePaid: totalPaid,
+          remainingBalance: remaining,
+        };
+      }
+    }
+
     // ── Acquire processing lock ──────────────────────────────
     if (processingLocks.has(transaction.id)) {
       return {
@@ -483,22 +514,30 @@ export class TransactionService {
 
     let confirmedMsgId: number | undefined;
     const additionalConfirmedMsgIds: number[] = [];
-    let pendingReceiptMsgId: number | undefined;
-    let historyMsgId: number | undefined;
+    let fallbackHistoryMsgId: number | undefined;
 
-    // Helper for rolling back all created messages
+    // Helper for rolling back all created messages in Confirmed topic
     const rollbackAllCreatedMessages = async () => {
-      if (historyMsgId) {
-        try { await api.deleteMessage(chatId, historyMsgId); } catch { /* best effort */ }
-      }
-      if (pendingReceiptMsgId) {
-        try { await api.deleteMessage(chatId, pendingReceiptMsgId); } catch { /* best effort */ }
+      if (fallbackHistoryMsgId) {
+        try {
+          await api.deleteMessage(chatId, fallbackHistoryMsgId);
+        } catch {
+          /* best effort */
+        }
       }
       for (const id of additionalConfirmedMsgIds) {
-        try { await api.deleteMessage(chatId, id); } catch { /* best effort */ }
+        try {
+          await api.deleteMessage(chatId, id);
+        } catch {
+          /* best effort */
+        }
       }
       if (confirmedMsgId) {
-        try { await api.deleteMessage(chatId, confirmedMsgId); } catch { /* best effort */ }
+        try {
+          await api.deleteMessage(chatId, confirmedMsgId);
+        } catch {
+          /* best effort */
+        }
       }
     };
 
@@ -506,14 +545,50 @@ export class TransactionService {
       const paidAt = nowISO();
       const distributorName = transaction.distributorSnapshot?.name ?? null;
 
-      // Determine which message to copy: bot's message if available, otherwise original
+      // Determine which message represents the invoice in Pending
       const invoiceMessageId = transaction.metadataMessageId ?? transaction.originalMessageId;
 
-      // Extract optional note from payment message
-      const rawNote = (paymentEvidenceMsg?.caption ?? paymentEvidenceMsg?.text ?? '')
-        .replace(/^\/(paid|confirmed)(@\w+)?\s*/i, '')
-        .trim();
-      const userNote = rawNote || undefined;
+      // Extract payment amount & note from message if not supplied explicitly
+      const rawText = (paymentEvidenceMsg?.caption ?? paymentEvidenceMsg?.text ?? '').trim();
+      const parsedCmd = parsePaidCommandPayload(rawText);
+      const effectivePaymentAmount =
+        paymentAmount !== undefined && paymentAmount !== null
+          ? paymentAmount
+          : parsedCmd.paymentAmount;
+      const effectiveNote =
+        userNote !== undefined && userNote !== null
+          ? userNote
+          : (parsedCmd.userNote || undefined);
+
+      // ── Accounting calculations ──────────────────────────────
+      const previousTotalPaid =
+        typeof this.repo.getTotalPaid === 'function'
+          ? await this.repo.getTotalPaid(transaction.id)
+          : 0;
+      let payAmount: number;
+      if (
+        effectivePaymentAmount !== null &&
+        effectivePaymentAmount !== undefined &&
+        effectivePaymentAmount > 0
+      ) {
+        payAmount = effectivePaymentAmount;
+      } else {
+        // Pay remaining balance in full
+        payAmount =
+          transaction.amount !== null
+            ? Math.max(0, transaction.amount - previousTotalPaid)
+            : 0;
+      }
+
+      const cumulativePaid = previousTotalPaid + payAmount;
+      const remainingBalance =
+        transaction.amount !== null ? Math.max(0, transaction.amount - cumulativePaid) : 0;
+      const newStatus: TransactionStatus =
+        transaction.amount !== null && remainingBalance <= 0
+          ? 'PAID'
+          : transaction.amount === null && effectivePaymentAmount === null
+          ? 'PAID'
+          : 'PARTIALLY_PAID';
 
       // ── Phase 1: Create confirmation in Confirmed topic ────
       const headerText = formatConfirmedHeader(
@@ -522,8 +597,14 @@ export class TransactionService {
         transaction.receivedAt,
         paidAt,
         transaction.id,
-        userNote,
-        transaction.notes
+        effectiveNote,
+        transaction.notes,
+        {
+          status: newStatus,
+          paymentAmount: payAmount,
+          cumulativePaid,
+          remainingBalance,
+        }
       );
 
       // Extract original invoice content (preserving item breakdown, text, or captions)
@@ -532,15 +613,20 @@ export class TransactionService {
       const originalInvoiceContent = extractedOriginal.trim() || invoiceRawText.trim();
 
       // Combined text for Confirmed topic: PAID header + blank line + original invoice content
-      const combinedConfirmedText = formatConfirmedInvoiceContent(headerText, originalInvoiceContent);
+      const combinedConfirmedText = formatConfirmedInvoiceContent(
+        headerText,
+        originalInvoiceContent
+      );
 
       // Extract file IDs from invoice and payment media
-      const invoicePhoto = (invoiceMsg?.photo && invoiceMsg.photo.length > 0)
-        ? invoiceMsg.photo[invoiceMsg.photo.length - 1].file_id
-        : null;
-      const paymentPhoto = (paymentEvidenceMsg?.photo && paymentEvidenceMsg.photo.length > 0)
-        ? paymentEvidenceMsg.photo[paymentEvidenceMsg.photo.length - 1].file_id
-        : null;
+      const invoicePhoto =
+        invoiceMsg?.photo && invoiceMsg.photo.length > 0
+          ? invoiceMsg.photo[invoiceMsg.photo.length - 1].file_id
+          : null;
+      const paymentPhoto =
+        paymentEvidenceMsg?.photo && paymentEvidenceMsg.photo.length > 0
+          ? paymentEvidenceMsg.photo[paymentEvidenceMsg.photo.length - 1].file_id
+          : null;
 
       const invoiceDoc = invoiceMsg?.document?.file_id ?? null;
       const paymentDoc = paymentEvidenceMsg?.document?.file_id ?? null;
@@ -548,9 +634,10 @@ export class TransactionService {
       try {
         if (invoicePhoto && paymentPhoto) {
           // Both are photos: send TOGETHER as ONE media group (album)
-          const caption = combinedConfirmedText.length <= MAX_CAPTION_LENGTH
-            ? combinedConfirmedText
-            : headerText;
+          const caption =
+            combinedConfirmedText.length <= MAX_CAPTION_LENGTH
+              ? combinedConfirmedText
+              : headerText;
           const album = await api.sendMediaGroup(
             chatId,
             [
@@ -562,7 +649,7 @@ export class TransactionService {
               {
                 type: 'photo',
                 media: paymentPhoto,
-                caption: paymentEvidenceMsg?.caption || undefined,
+                caption: effectiveNote ? `🧾 Payment Receipt: ${effectiveNote}` : '🧾 Payment Receipt',
               },
             ],
             { message_thread_id: config.confirmedTopicId }
@@ -572,7 +659,6 @@ export class TransactionService {
             additionalConfirmedMsgIds.push(album[1].message_id);
           }
 
-          // If combined text exceeded caption length, send remaining invoice content as follow-up text message(s)
           if (combinedConfirmedText.length > MAX_CAPTION_LENGTH && originalInvoiceContent) {
             const chunks = splitTextMessage(originalInvoiceContent, MAX_TEXT_LENGTH);
             for (const chunk of chunks) {
@@ -584,9 +670,10 @@ export class TransactionService {
           }
         } else if (invoiceDoc && paymentDoc) {
           // Both are documents: send TOGETHER as ONE media group
-          const caption = combinedConfirmedText.length <= MAX_CAPTION_LENGTH
-            ? combinedConfirmedText
-            : headerText;
+          const caption =
+            combinedConfirmedText.length <= MAX_CAPTION_LENGTH
+              ? combinedConfirmedText
+              : headerText;
           const album = await api.sendMediaGroup(
             chatId,
             [
@@ -598,7 +685,7 @@ export class TransactionService {
               {
                 type: 'document',
                 media: paymentDoc,
-                caption: paymentEvidenceMsg?.caption || undefined,
+                caption: effectiveNote ? `🧾 Payment Receipt: ${effectiveNote}` : '🧾 Payment Receipt',
               },
             ],
             { message_thread_id: config.confirmedTopicId }
@@ -635,8 +722,8 @@ export class TransactionService {
           // If there is payment evidence (photo, doc, or text receipt), copy it into Confirmed
           if (paymentEvidenceMsg && paymentEvidenceMsg.message_id !== invoiceMessageId) {
             if (paymentPhoto || paymentDoc) {
-              const receiptCaption = userNote
-                ? `🧾 Payment Receipt: ${userNote}`
+              const receiptCaption = effectiveNote
+                ? `🧾 Payment Receipt: ${effectiveNote}`
                 : '🧾 Payment Receipt';
               const copied = await api.copyMessage(chatId, chatId, paymentEvidenceMsg.message_id, {
                 message_thread_id: config.confirmedTopicId,
@@ -652,16 +739,16 @@ export class TransactionService {
           }
         } else {
           // Single media invoice (photo/doc invoice without matched media payment group)
-          const caption = combinedConfirmedText.length <= MAX_CAPTION_LENGTH
-            ? combinedConfirmedText
-            : headerText;
+          const caption =
+            combinedConfirmedText.length <= MAX_CAPTION_LENGTH
+              ? combinedConfirmedText
+              : headerText;
           const copied = await api.copyMessage(chatId, chatId, invoiceMessageId, {
             message_thread_id: config.confirmedTopicId,
             caption,
           });
           confirmedMsgId = copied.message_id;
 
-          // If caption length limit prevented appending original invoice caption, send full content as follow-up text
           if (combinedConfirmedText.length > MAX_CAPTION_LENGTH && originalInvoiceContent) {
             const chunks = splitTextMessage(originalInvoiceContent, MAX_TEXT_LENGTH);
             for (const chunk of chunks) {
@@ -672,21 +759,30 @@ export class TransactionService {
             }
           }
 
-          // If there is payment evidence (photo, doc, or text receipt) that could not be grouped, copy it to Confirmed
           if (paymentEvidenceMsg && paymentEvidenceMsg.message_id !== invoiceMessageId) {
             if (paymentPhoto || paymentDoc) {
-              const receiptCaption = userNote
-                ? `🧾 Payment Receipt: ${userNote}`
+              const receiptCaption = effectiveNote
+                ? `🧾 Payment Receipt: ${effectiveNote}`
                 : '🧾 Payment Receipt';
-              const copiedEvidence = await api.copyMessage(chatId, chatId, paymentEvidenceMsg.message_id, {
-                message_thread_id: config.confirmedTopicId,
-                caption: receiptCaption,
-              });
+              const copiedEvidence = await api.copyMessage(
+                chatId,
+                chatId,
+                paymentEvidenceMsg.message_id,
+                {
+                  message_thread_id: config.confirmedTopicId,
+                  caption: receiptCaption,
+                }
+              );
               additionalConfirmedMsgIds.push(copiedEvidence.message_id);
             } else {
-              const copiedEvidence = await api.copyMessage(chatId, chatId, paymentEvidenceMsg.message_id, {
-                message_thread_id: config.confirmedTopicId,
-              });
+              const copiedEvidence = await api.copyMessage(
+                chatId,
+                chatId,
+                paymentEvidenceMsg.message_id,
+                {
+                  message_thread_id: config.confirmedTopicId,
+                }
+              );
               additionalConfirmedMsgIds.push(copiedEvidence.message_id);
             }
           }
@@ -701,71 +797,53 @@ export class TransactionService {
 
       const confirmationUrl = buildMessageLink(chatId, confirmedMsgId);
 
-      // ── Phase 2: Record in Pending + DB ────────────────────
-
-      // 1. Copy payment evidence into Pending topic (photos, docs, text receipts)
-      if (paymentEvidenceMsg && paymentEvidenceMsg.message_id !== invoiceMessageId) {
-        try {
-          const copied = await api.copyMessage(chatId, chatId, paymentEvidenceMsg.message_id, {
-            message_thread_id: config.pendingTopicId,
-          });
-          pendingReceiptMsgId = copied.message_id;
-        } catch (err: unknown) {
-          await rollbackAllCreatedMessages();
-          return {
-            success: false,
-            error: `Failed to copy payment evidence to Pending: ${(err as Error).message}`,
-          };
-        }
-      }
-
-      // 2. Create history record in Pending topic
-      try {
-        const historyText = formatHistoryRecord(
-          distributorName,
-          transaction.amount,
-          transaction.receivedAt,
-          paidAt,
-          confirmationUrl,
+      // ── Phase 2: Record Payment in DB ────────────────────
+      if (typeof this.repo.recordPayment === 'function') {
+        await this.repo.recordPayment(
           transaction.id,
-          userNote,
-          transaction.notes
+          payAmount,
+          paidAt,
+          paymentMsgId,
+          confirmedMsgId,
+          null,
+          effectiveNote
         );
-        const historyMsg = await api.sendMessage(chatId, historyText, {
-          message_thread_id: config.pendingTopicId,
-        });
-        historyMsgId = historyMsg.message_id;
-      } catch (err: unknown) {
-        await rollbackAllCreatedMessages();
-        return {
-          success: false,
-          error: `Failed to create history record: ${(err as Error).message}`,
-        };
       }
 
-      // 3. Update DB — compare-and-swap
       let committed = false;
       try {
-        committed = await this.repo.markPaid(
-          transaction.id,
-          paidAt,
-          paymentEvidenceMsg?.message_id ?? commandMessageId,
-          confirmedMsgId,
-          confirmationUrl,
-          historyMsgId
-        );
+        if (typeof this.repo.updateTransactionPaymentStatus === 'function') {
+          committed = await this.repo.updateTransactionPaymentStatus({
+            id: transaction.id,
+            status: newStatus,
+            paidAt,
+            paymentMessageId: paymentMsgId,
+            confirmationMessageId: confirmedMsgId,
+            confirmationUrl,
+            historyMessageId: null,
+            allowFromStatuses: ['PENDING', 'PARTIALLY_PAID'],
+          });
+        } else {
+          committed = await this.repo.markPaid(
+            transaction.id,
+            paidAt,
+            paymentMsgId,
+            confirmedMsgId,
+            confirmationUrl,
+            0
+          );
+        }
       } catch (dbErr: unknown) {
-        // A D1 error or network timeout occurred. Verify whether the database actually committed!
+        // D1 or network timeout verification
         let verificationSucceeded = false;
         try {
           const verifyTx = await this.repo.findById(transaction.id);
           verificationSucceeded = true;
           if (
             verifyTx &&
-            verifyTx.status === 'PAID' &&
+            verifyTx.status === newStatus &&
             verifyTx.confirmation_message_id === confirmedMsgId
           ) {
-            // The write succeeded on the database before the network error/timeout!
             committed = true;
           }
         } catch (verifyErr: unknown) {
@@ -776,18 +854,13 @@ export class TransactionService {
         }
 
         if (committed) {
-          // Treated as committed — proceed to Phase 3 cleanup
+          // Treated as committed
         } else if (!verificationSucceeded) {
-          // Both the write and the verification query failed! Commit status is UNCERTAIN.
-          console.error(
-            `Transaction ${transaction.id} commit status is uncertain. Preserving Telegram confirmation messages.`
-          );
           return {
             success: false,
             error: `Database write and verification both failed. Commit status is uncertain; Telegram messages were preserved to prevent data loss. Original error: ${(dbErr as Error).message}`,
           };
         } else {
-          // Verification query confirmed row was NOT committed. Clean up orphan messages.
           await rollbackAllCreatedMessages();
           return {
             success: false,
@@ -804,76 +877,67 @@ export class TransactionService {
         };
       }
 
-      // ── Phase 3: Retain & edit original Pending invoice message ─
-      // NEVER delete the invoice message or payment evidence automatically.
+      // ── Phase 3: Update Pending Topic & Cleanup ─────────
       try {
         if (invoiceMsg) {
           const msgType = detectMessageType(invoiceMsg);
-          const isMedia = msgType === 'photo' || msgType === 'document' || invoiceMsg.caption !== undefined;
-          const currentContent = invoiceMsg.text ?? invoiceMsg.caption ?? '';
-          const maxLen = isMedia ? MAX_CAPTION_LENGTH : MAX_TEXT_LENGTH;
-          const noticeResult = appendManualDeletionNotice(currentContent, maxLen);
+          const isMedia =
+            msgType === 'photo' || msgType === 'document' || invoiceMsg.caption !== undefined;
 
-          if (noticeResult.overflow) {
-            // Insufficient room: keep original caption/text intact, remove keyboard
-            try {
-              await api.editMessageReplyMarkup(chatId, invoiceMessageId, {
-                reply_markup: { inline_keyboard: [] },
-              });
-            } catch {
-              /* best effort */
-            }
-            // Send warning as a separate reply/message
-            try {
-              await api.sendMessage(chatId, MANUAL_DELETION_NOTICE, {
-                message_thread_id: config.pendingTopicId,
-                reply_parameters: { message_id: invoiceMessageId },
-              });
-            } catch (noticeErr: unknown) {
-              console.warn(`Failed to send separate warning message: ${(noticeErr as Error).message}`);
-            }
-          } else {
-            // Fits (or notice already present)
+          if (newStatus === 'PAID') {
+            // FULL PAYMENT (Bug 2):
+            // Replace caption with ONLY invoice ID + status text. Remove unwanted manual-deletion text.
+            const cleanedCaption = formatCleanedPendingInvoiceCaption(
+              transaction.id,
+              'PAID',
+              confirmationUrl
+            );
+
             let editSucceeded = false;
             if (isMedia) {
               try {
                 await api.editMessageCaption(chatId, invoiceMessageId, {
-                  caption: noticeResult.text,
+                  caption: cleanedCaption,
                   reply_markup: { inline_keyboard: [] },
                 });
                 editSucceeded = true;
               } catch (editErr: unknown) {
-                console.warn(`Failed to edit pending invoice caption ${invoiceMessageId}:`, (editErr as Error).message);
+                console.warn(
+                  `Failed to edit pending invoice caption ${invoiceMessageId}:`,
+                  (editErr as Error).message
+                );
               }
             } else {
               try {
-                await api.editMessageText(chatId, invoiceMessageId, noticeResult.text, {
+                await api.editMessageText(chatId, invoiceMessageId, cleanedCaption, {
                   reply_markup: { inline_keyboard: [] },
                 });
                 editSucceeded = true;
               } catch (textErr: unknown) {
-                // Classify error: only fall back to editMessageCaption if the error reliably
-                // indicates absence of editable text (genuine media message)
                 if (isNoTextMessageError(textErr)) {
                   try {
                     await api.editMessageCaption(chatId, invoiceMessageId, {
-                      caption: noticeResult.text,
+                      caption: cleanedCaption,
                       reply_markup: { inline_keyboard: [] },
                     });
                     editSucceeded = true;
                   } catch (captionErr: unknown) {
-                    console.warn(`Failed to edit pending invoice caption fallback ${invoiceMessageId}:`, (captionErr as Error).message);
+                    console.warn(
+                      `Failed to edit pending invoice caption fallback ${invoiceMessageId}:`,
+                      (captionErr as Error).message
+                    );
                   }
                 } else {
-                  // For network errors, rate limits, server errors, permission failures, or uneditable messages:
-                  // Avoid an unnecessary second edit attempt!
-                  console.warn(`Failed to edit pending invoice text ${invoiceMessageId} with non-media error, skipping caption edit:`, (textErr as Error).message);
+                  console.warn(
+                    `Failed to edit pending invoice text ${invoiceMessageId}:`,
+                    (textErr as Error).message
+                  );
                 }
               }
             }
 
             if (!editSucceeded) {
-              // Attempt to remove inline keyboard while keeping original content intact
+              // Best effort: remove keyboard
               try {
                 await api.editMessageReplyMarkup(chatId, invoiceMessageId, {
                   reply_markup: { inline_keyboard: [] },
@@ -881,45 +945,129 @@ export class TransactionService {
               } catch {
                 /* best effort */
               }
-              console.warn(`Warning could not be added to original invoice message ${invoiceMessageId}`);
+            }
+          } else {
+            // PARTIAL PAYMENT:
+            // Update display to reflect partial payment and remaining balance
+            const keyboard = transaction.distributorSnapshot?.accountNumber
+              ? copyAccountKeyboard(transaction.distributorSnapshot.accountNumber)
+              : undefined;
+
+            const progressMetadata = buildMetadataBlock(
+              transaction.distributorSnapshot,
+              transaction.amount,
+              transaction.receivedAt,
+              transaction.id,
+              transaction.notes,
+              { cumulativePaid, remainingBalance }
+            );
+
+            const originalCaption = invoiceMsg.text ?? invoiceMsg.caption ?? '';
+            const { original } = splitOriginalAndMetadata(originalCaption);
+            const newContent = original
+              ? composeMessageText(original, progressMetadata)
+              : progressMetadata;
+
+            if (isMedia) {
+              try {
+                await api.editMessageCaption(chatId, invoiceMessageId, {
+                  caption:
+                    newContent.length <= MAX_CAPTION_LENGTH ? newContent : progressMetadata,
+                  reply_markup: keyboard,
+                });
+              } catch (editErr: unknown) {
+                console.warn(
+                  `Failed to edit pending invoice caption for partial payment:`,
+                  (editErr as Error).message
+                );
+              }
+            } else {
+              try {
+                await api.editMessageText(
+                  chatId,
+                  invoiceMessageId,
+                  newContent.length <= MAX_TEXT_LENGTH ? newContent : progressMetadata,
+                  {
+                    reply_markup: keyboard,
+                  }
+                );
+              } catch (textErr: unknown) {
+                console.warn(
+                  `Failed to edit pending invoice text for partial payment:`,
+                  (textErr as Error).message
+                );
+              }
             }
           }
         } else {
-          // invoiceMsg was not provided (explicit /paid #INV0001 without reply).
-          // Original content cannot be retrieved. NEVER replace the original invoice with only the deletion notice!
-          // Preserve the original message, remove its inline keyboard where possible, and send the warning separately.
+          // invoiceMsg was not provided (standalone /paid #INV0001 without reply).
+          // Remove inline keyboard from pending invoice
           try {
             await api.editMessageReplyMarkup(chatId, invoiceMessageId, {
               reply_markup: { inline_keyboard: [] },
             });
-          } catch (markupErr: unknown) {
-            console.warn(`Could not remove inline keyboard for invoice ${invoiceMessageId}:`, (markupErr as Error).message);
+          } catch {
+            /* best effort */
           }
 
+          // Post a single clear history record into Pending topic
           try {
-            await api.sendMessage(chatId, MANUAL_DELETION_NOTICE, {
+            const historyText = formatHistoryRecord(
+              distributorName,
+              transaction.amount,
+              transaction.receivedAt,
+              paidAt,
+              confirmationUrl,
+              transaction.id,
+              effectiveNote,
+              transaction.notes,
+              {
+                status: newStatus,
+                paymentAmount: payAmount,
+                cumulativePaid,
+                remainingBalance,
+              }
+            );
+            const sentHistory = await api.sendMessage(chatId, historyText, {
               message_thread_id: config.pendingTopicId,
-              reply_parameters: { message_id: invoiceMessageId },
             });
+            fallbackHistoryMsgId = sentHistory.message_id;
           } catch (sendErr: unknown) {
-            console.warn(`Could not send separate deletion warning for invoice ${invoiceMessageId}:`, (sendErr as Error).message);
+            console.warn(`Failed to send history record: ${(sendErr as Error).message}`);
           }
         }
       } catch (err: unknown) {
-        console.warn(`Phase 3 warning handling error for message ${invoiceMessageId}:`, (err as Error).message);
+        console.warn(
+          `Phase 3 message display update error for message ${invoiceMessageId}:`,
+          (err as Error).message
+        );
       }
 
-      // Delete pure payment command message (/paid) from Pending only if it contains no receipt or note
+      // Cleanup receipt and command messages from Pending (Bug 3)
+      // Original receipt message in Pending must be processed once and cleaned up after Confirmed copy succeeds
+      if (paymentEvidenceMsg && paymentEvidenceMsg.message_id !== invoiceMessageId) {
+        try {
+          await api.deleteMessage(chatId, paymentEvidenceMsg.message_id);
+        } catch (err: unknown) {
+          console.warn(
+            `Failed to delete receipt message ${paymentEvidenceMsg.message_id} from Pending:`,
+            (err as Error).message
+          );
+        }
+      }
+
       if (
         commandMessageId &&
-        (!paymentEvidenceMsg || commandMessageId !== paymentEvidenceMsg.message_id) &&
         commandMessageId !== invoiceMessageId &&
-        !userNote
+        (!paymentEvidenceMsg || commandMessageId !== paymentEvidenceMsg.message_id)
       ) {
         try {
           await api.deleteMessage(chatId, commandMessageId);
         } catch (err: unknown) {
-          console.warn(`Failed to delete command message ${commandMessageId}:`, (err as Error).message);
+          console.warn(
+            `Failed to delete command message ${commandMessageId}:`,
+            (err as Error).message
+          );
         }
       }
 
@@ -927,8 +1075,11 @@ export class TransactionService {
         success: true,
         confirmationUrl,
         confirmedMessageId: confirmedMsgId,
-        pendingReceiptMessageId: pendingReceiptMsgId,
-        historyMessageId: historyMsgId,
+        historyMessageId: fallbackHistoryMsgId,
+        status: newStatus,
+        paidAmount: payAmount,
+        cumulativePaid,
+        remainingBalance,
       };
     } finally {
       processingLocks.delete(transaction.id);

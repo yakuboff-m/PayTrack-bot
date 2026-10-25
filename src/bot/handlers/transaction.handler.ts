@@ -10,6 +10,7 @@ import {
   isFromBot,
   isCommand,
   isReply,
+  isTopicServiceMessage,
   getEffectiveRepliedMessage,
   METADATA_SEPARATOR,
 } from '../helpers/telegram.helpers';
@@ -42,6 +43,9 @@ export function registerTransactionHandler(
     // Only process messages in the Pending topic
     if (msg.message_thread_id !== config.pendingTopicId) return next();
     if (ctx.chat.id !== config.telegramGroupId) return next();
+
+    // Skip topic service messages
+    if (isTopicServiceMessage(msg)) return next();
 
     // Skip bot messages
     if (isFromBot(msg)) return next();
@@ -113,7 +117,7 @@ export function registerTransactionHandler(
     const payload = match[2]?.trim() || null;
 
     // Skip known framework commands
-    const reservedCommands = ['help', 'distributors', 'add_distributor', 'amount', 'confirmed', 'paid', 'start', 'note'];
+    const reservedCommands = ['help', 'distributors', 'add_distributor', 'amount', 'add', 'confirmed', 'paid', 'start', 'note'];
     if (reservedCommands.includes(alias)) return next();
 
     // Look up distributor by alias

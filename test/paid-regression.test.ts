@@ -327,24 +327,22 @@ describe('Regression: /paid with Receipt Image and #INV0009', () => {
       assert.equal(mediaGroup.media[1].media, 'receipt_large_id');
       assert.match(mediaGroup.media[0].caption, /#INV0009/);
 
-      // Verify history record posted in Pending topic
-      const historyMsg = sentMessages.find((m) => m.message_thread_id === testConfig.pendingTopicId);
-      assert.ok(historyMsg);
-      assert.match(historyMsg.text, /#INV0009/);
-
-      // Verify ephemeral confirmation message was sent and not an error
+      // Verify error was not returned
       const errorMsg = sentMessages.find((m) => typeof m.text === 'string' && m.text.includes('Invalid payment confirmation'));
       assert.equal(errorMsg, undefined, 'Must not return "Invalid payment confirmation" error');
 
-      // Verify pending messages were NOT deleted automatically
-      assert.equal(deletedMessageIds.includes(2001), false, 'Payment receipt message must NOT be deleted');
-      assert.equal(deletedMessageIds.includes(5009), false, 'Invoice message must NOT be deleted');
+      // Verify payment receipt was cleaned up from Pending once confirmed (Bug 3)
+      assert.equal(deletedMessageIds.includes(2001), true, 'Payment receipt message must be cleaned up from Pending');
+      // Invoice media in Pending was NOT deleted (Bug 2)
+      assert.equal(deletedMessageIds.includes(5009), false, 'Invoice message media must NOT be deleted');
 
-      // Verify the original invoice message in Pending was edited in place with the manual-deletion notice
+      // Verify the original invoice caption in Pending was cleaned: preserves ONLY invoice ID + status (Bug 2)
       const editedInvoice = editedCaptions.find((e) => e.message_id === 5009);
-      assert.ok(editedInvoice, 'Invoice message must be edited in place with notice');
-      assert.match(editedInvoice.caption, /⚠️ Should be deleted manually!/);
-      assert.match(editedInvoice.caption, /🧾 MEAT INVOICE/);
+      assert.ok(editedInvoice, 'Invoice message must be edited in place');
+      assert.match(editedInvoice.caption, /#INV0009/);
+      assert.match(editedInvoice.caption, /✅ PAID/);
+      assert.equal(editedInvoice.caption.includes('Should be deleted manually'), false, 'Must NOT contain "Should be deleted manually!"');
+      assert.equal(editedInvoice.caption.includes('MEAT INVOICE'), false, 'Must remove original meat invoice breakdown from Pending caption');
       assert.deepEqual(editedInvoice.reply_markup, { inline_keyboard: [] });
     });
 
@@ -481,7 +479,7 @@ describe('Regression: /paid with Receipt Image and #INV0009', () => {
       assert.equal(sentMediaGroups.length, 1);
     });
 
-    it('removes copy button and adds "Should be deleted manually!" notice when Telegram deleteMessage fails on older invoice', async () => {
+    it('removes copy button and cleans invoice caption preserving invoice ID and status when Telegram deleteMessage fails on older invoice', async () => {
       const {
         bot,
         txRepo,
@@ -537,12 +535,13 @@ describe('Regression: /paid with Receipt Image and #INV0009', () => {
       assert.ok(updatedTx);
       assert.equal(updatedTx.status, 'PAID');
 
-      // Verify editMessageCaption was called on message 87 and preserves invoice content + notice
+      // Verify editMessageCaption was called on message 87 and preserves ONLY invoice ID + status (Bug 2)
       const edited = editedCaptions.find((e) => e.message_id === 87);
       assert.ok(edited, 'Old invoice message 87 must be edited');
-      assert.match(edited.caption, /⚠️ Should be deleted manually!/);
       assert.match(edited.caption, /🆔 #INV0001/);
-      assert.match(edited.caption, /ABC distribution/);
+      assert.match(edited.caption, /✅ PAID/);
+      assert.equal(edited.caption.includes('Should be deleted manually'), false, 'Must NOT contain "Should be deleted manually!"');
+      assert.equal(edited.caption.includes('ABC distribution'), false, 'Must remove old distributor details from Pending caption');
       // Verify copy button was removed
       assert.deepEqual(edited.reply_markup, { inline_keyboard: [] });
       // Verify message 87 was NOT deleted
@@ -802,7 +801,7 @@ describe('Regression: /paid with Receipt Image and #INV0009', () => {
       // Header check
       assert.match(confirmedText, /✅ PAID • #INV0001/);
       assert.match(confirmedText, /🏢 Halal Meat Co/);
-      assert.match(confirmedText, /💰 ₩892,036/);
+      assert.match(confirmedText, /💰 (?:Total: )?₩892,036/);
       // Separation check
       assert.match(confirmedText, /━━━━━━━━━━━━\n\n🧾 MEAT INVOICE/);
       // Full invoice content check
@@ -813,11 +812,11 @@ describe('Regression: /paid with Receipt Image and #INV0009', () => {
       assert.match(confirmedText, /= ₩96,000/);
       assert.match(confirmedText, /💰 Total: ₩892,036/);
 
-      // 2. Pending topic verification: Invoice edited with notice, never deleted
+      // 2. Pending topic verification: Invoice edited with clean status, never deleted
       const edited = editedTexts.find((e) => e.message_id === 501);
       assert.ok(edited, 'Pending invoice must be edited via editMessageText');
-      assert.match(edited.text, /🧾 MEAT INVOICE/);
-      assert.match(edited.text, /⚠️ Should be deleted manually!/);
+      assert.match(edited.text, /#INV0001 • ✅ PAID/);
+      assert.doesNotMatch(edited.text, /⚠️ Should be deleted manually!/);
       assert.deepEqual(edited.reply_markup, { inline_keyboard: [] });
       assert.equal(deletedMessageIds.includes(501), false, 'Pending invoice must never be deleted');
     });
@@ -876,28 +875,23 @@ describe('Regression: /paid with Receipt Image and #INV0009', () => {
       assert.match(confirmedMsgs[0].text, /Weekly spices delivery invoice #99: ₩150,000/);
       assert.match(confirmedMsgs[0].text, /KakaoPay transfer/);
 
-      // 2. Both Confirmed and Pending topics receive copied receipt photo
-      assert.equal(copiedMessages.length, 2, 'Should copy payment receipt to Confirmed and Pending');
+      // 2. Confirmed topic receives copied receipt photo (Pending does NOT receive redundant copy)
+      assert.equal(copiedMessages.length, 1, 'Should copy payment receipt only to Confirmed');
       const confirmedReceiptCopy = copiedMessages.find(
         (c) => c.from_message_id === 602 && c.message_thread_id === testConfig.confirmedTopicId
       );
       assert.ok(confirmedReceiptCopy, 'Confirmed topic must have copied receipt');
       assert.match(confirmedReceiptCopy.caption, /🧾 Payment Receipt: KakaoPay transfer/);
 
-      const pendingReceiptCopy = copiedMessages.find(
-        (c) => c.from_message_id === 602 && c.message_thread_id === testConfig.pendingTopicId
-      );
-      assert.ok(pendingReceiptCopy, 'Pending topic must have copied receipt');
-
-      // 3. Neither invoice message nor receipt photo in Pending are deleted
+      // 3. Invoice message in Pending is retained (not deleted), original receipt in Pending is cleaned up
       assert.equal(deletedMessageIds.includes(502), false, 'Invoice message must not be deleted');
-      assert.equal(deletedMessageIds.includes(602), false, 'Payment receipt message must not be deleted');
+      assert.equal(deletedMessageIds.includes(602), true, 'Payment receipt message must be cleaned up from Pending');
 
-      // 4. Pending invoice message is edited with the notice
+      // 4. Pending invoice message is edited with clean status
       const edited = editedTexts.find((e) => e.message_id === 502);
       assert.ok(edited);
-      assert.match(edited.text, /⚠️ Should be deleted manually!/);
-      assert.match(edited.text, /Weekly spices delivery invoice #99/);
+      assert.match(edited.text, /#INV/);
+      assert.doesNotMatch(edited.text, /⚠️ Should be deleted manually!/);
     });
 
     it('preserves photo invoice with caption and payment document receipt', async () => {
@@ -948,7 +942,7 @@ describe('Regression: /paid with Receipt Image and #INV0009', () => {
       await bot.handleUpdate(paymentUpdate as any);
 
       // Media copied to Confirmed and Pending (invoice to Confirmed, doc receipt to Confirmed & Pending)
-      assert.ok(copiedMessages.length >= 3, 'Should copy photo invoice to Confirmed, and document receipt to Confirmed and Pending');
+      assert.equal(copiedMessages.length, 2, 'Should copy photo invoice and document receipt to Confirmed');
       const invoiceCopy = copiedMessages.find(
         (c) => c.from_message_id === 503 && c.message_thread_id === testConfig.confirmedTopicId
       );
@@ -962,19 +956,14 @@ describe('Regression: /paid with Receipt Image and #INV0009', () => {
       assert.ok(docConfirmedCopy, 'Document receipt must be copied to Confirmed');
       assert.match(docConfirmedCopy.caption, /🧾 Payment Receipt/);
 
-      const docPendingCopy = copiedMessages.find(
-        (c) => c.from_message_id === 603 && c.message_thread_id === testConfig.pendingTopicId
-      );
-      assert.ok(docPendingCopy, 'Document receipt must be copied to Pending');
-
-      // Pending message retained and edited
+      // Pending message retained and edited; receipt cleaned up
       assert.equal(deletedMessageIds.includes(503), false);
-      assert.equal(deletedMessageIds.includes(603), false);
+      assert.equal(deletedMessageIds.includes(603), true);
 
       const edited = editedCaptions.find((e) => e.message_id === 503);
       assert.ok(edited);
-      assert.match(edited.caption, /Meat delivery batch #777 photo/);
-      assert.match(edited.caption, /⚠️ Should be deleted manually!/);
+      assert.match(edited.caption, /#INV/);
+      assert.doesNotMatch(edited.caption, /⚠️ Should be deleted manually!/);
       assert.deepEqual(edited.reply_markup, { inline_keyboard: [] });
     });
 
@@ -1026,11 +1015,11 @@ describe('Regression: /paid with Receipt Image and #INV0009', () => {
 
       // deleteMessage is never called on 504
       assert.equal(deletedMessageIds.includes(504), false);
-      // Edited in place with the notice
+      // Edited in place with clean status
       const edited = editedCaptions.find((e) => e.message_id === 504);
       assert.ok(edited);
-      assert.match(edited.caption, /Invoice photo older than 48 hours/);
-      assert.match(edited.caption, /⚠️ Should be deleted manually!/);
+      assert.match(edited.caption, /#INV/);
+      assert.doesNotMatch(edited.caption, /⚠️ Should be deleted manually!/);
       assert.deepEqual(edited.reply_markup, { inline_keyboard: [] });
     });
 
@@ -1152,13 +1141,8 @@ describe('Regression: /paid with Receipt Image and #INV0009', () => {
       );
       assert.ok(confirmedCopy, 'Text receipt must be copied to Confirmed topic');
 
-      const pendingCopy = copiedMessages.find(
-        (c) => c.from_message_id === 606 && c.message_thread_id === testConfig.pendingTopicId
-      );
-      assert.ok(pendingCopy, 'Text receipt must be copied to Pending topic');
-
-      // Original text receipt message 606 is NOT deleted
-      assert.equal(deletedMessageIds.includes(606), false, 'Original text receipt must not be deleted');
+      // Original text receipt message 606 is cleaned up from Pending
+      assert.equal(deletedMessageIds.includes(606), true, 'Original text receipt must be cleaned up from Pending');
     });
 
     it('handles text invoices over 4,096 characters by splitting cleanly into sequential messages without truncation', async () => {
@@ -1291,7 +1275,7 @@ describe('Regression: /paid with Receipt Image and #INV0009', () => {
       assert.match(album.media[0].caption, /✅ PAID/);
 
       // Item 1 preserves payment evidence caption
-      assert.equal(album.media[1].caption, '/paid Paid via KakaoPay');
+      assert.equal(album.media[1].caption, '🧾 Payment Receipt: Paid via KakaoPay');
 
       // Overflow message was sent as follow-up in Confirmed topic
       const followUpMsgs = sentMessages.filter((m) => m.message_thread_id === testConfig.confirmedTopicId);
@@ -1356,14 +1340,13 @@ describe('Regression: /paid with Receipt Image and #INV0009', () => {
       assert.ok(editedMarkup, 'Inline keyboard must be removed via editMessageReplyMarkup');
       assert.deepEqual(editedMarkup.reply_markup, { inline_keyboard: [] });
 
-      // 4. Deletion warning is sent separately as a reply to the original invoice
-      const warningMsg = sentMessages.find(
+      // 4. History record is sent in Pending topic
+      const historyMsg = sentMessages.find(
         (m) =>
           m.message_thread_id === testConfig.pendingTopicId &&
-          m.reply_parameters?.message_id === 509 &&
-          m.text?.includes('Should be deleted manually!')
+          m.text?.includes('PAID')
       );
-      assert.ok(warningMsg, 'Warning must be sent separately in Pending topic referencing original invoice');
+      assert.ok(historyMsg, 'History record must be sent in Pending topic');
 
       // 5. Transaction is committed as PAID
       const txCheck = await txRepo.findById(txA.id);
@@ -1489,7 +1472,8 @@ describe('Regression: /paid with Receipt Image and #INV0009', () => {
       // Caption edit fallback MUST be triggered for "no text in the message" error
       const editedCaption = editedCaptions.find((e) => e.message_id === 516);
       assert.ok(editedCaption, 'Caption edit must be triggered when text edit error indicates absence of text');
-      assert.match(editedCaption.caption, /⚠️ Should be deleted manually!/);
+      assert.match(editedCaption.caption, /#INV/);
+      assert.doesNotMatch(editedCaption.caption, /⚠️ Should be deleted manually!/);
       assert.deepEqual(editedCaption.reply_markup, { inline_keyboard: [] });
 
       // Original invoice remains intact
@@ -1564,18 +1548,11 @@ describe('Regression: /paid with Receipt Image and #INV0009', () => {
       );
       assert.ok(confirmedReceipt, 'Payment receipt copy must exist in Confirmed topic');
 
-      // Payment receipt was copied to Pending
-      const pendingReceipt = copiedMessages.find(
-        (c) => c.message_thread_id === testConfig.pendingTopicId && c.from_message_id === 617
-      );
-      assert.ok(pendingReceipt, 'Payment receipt copy must exist in Pending topic');
-
-      // Neither original invoice (517) nor original payment evidence (617) are deleted
+      // Original invoice (517) is NOT deleted
       assert.equal(deletedMessageIds.includes(517), false, 'Original invoice must NOT be deleted');
-      assert.equal(deletedMessageIds.includes(617), false, 'Original payment evidence must NOT be deleted');
     });
 
-    it('preserves long captions intact when adding notice would exceed 1,024 characters, sending notice as a separate message', async () => {
+    it('cleans long invoice captions by replacing them with only the invoice ID and status', async () => {
       const {
         bot,
         txRepo,
@@ -1583,7 +1560,6 @@ describe('Regression: /paid with Receipt Image and #INV0009', () => {
         distService,
         distributor,
         editedCaptions,
-        editedReplyMarkups,
         sentMessages,
       } = await setupTestContext();
 
@@ -1622,23 +1598,13 @@ describe('Regression: /paid with Receipt Image and #INV0009', () => {
 
       await bot.handleUpdate(paymentUpdate as any);
 
-      // Caption must NOT be truncated! editMessageCaption must not be called with truncated caption.
+      // Caption is cleanly replaced with ONLY invoice ID and status (under 1024 chars)
       const edited = editedCaptions.find((e) => e.message_id === 511);
-      assert.equal(edited, undefined, 'Must not edit caption with truncated text');
-
-      // Reply markup must be removed to clear inline keyboard
-      const markupEdit = editedReplyMarkups.find((m) => m.message_id === 511);
-      assert.ok(markupEdit, 'Must remove inline keyboard');
-      assert.deepEqual(markupEdit.reply_markup, { inline_keyboard: [] });
-
-      // Separate warning message must be sent in Pending topic referencing message 511
-      const separateNotice = sentMessages.find(
-        (m) =>
-          m.message_thread_id === testConfig.pendingTopicId &&
-          m.text?.includes('⚠️ Should be deleted manually!')
-      );
-      assert.ok(separateNotice, 'Must send warning as a separate message');
-      assert.equal(separateNotice.reply_parameters?.message_id, 511);
+      assert.ok(edited, 'Must edit caption with clean status');
+      assert.match(edited.caption, /#INV/);
+      assert.doesNotMatch(edited.caption, /⚠️ Should be deleted manually!/);
+      assert.ok(edited.caption.length <= 1024);
+      assert.deepEqual(edited.reply_markup, { inline_keyboard: [] });
     });
 
     it('is idempotent: repeated processing does not duplicate the warning or receipt copies', async () => {
@@ -1662,7 +1628,7 @@ describe('Regression: /paid with Receipt Image and #INV0009', () => {
       await txService.setAmount(invoiceTx.id, 88000);
       await txRepo.updateMetadataMessageId(invoiceTx.id, 512);
 
-      const invoiceText = 'Invoice text #512\n\n⚠️ Should be deleted manually!';
+      const invoiceText = 'Invoice text #512';
 
       const paymentUpdate = {
         update_id: 212,
@@ -1684,11 +1650,11 @@ describe('Regression: /paid with Receipt Image and #INV0009', () => {
 
       await bot.handleUpdate(paymentUpdate as any);
 
-      // Verify the warning was not duplicated into two warnings
+      // Verify no warning is added and no manual deletion notice is introduced
       const edited = editedTexts.find((e) => e.message_id === 512);
       assert.ok(edited);
-      const occurrences = (edited.text.match(/⚠️ Should be deleted manually!/g) || []).length;
-      assert.equal(occurrences, 1, 'Must not duplicate deletion notice');
+      assert.match(edited.text, /#INV/);
+      assert.doesNotMatch(edited.text, /⚠️ Should be deleted manually!/);
     });
 
     it('preserves safety guarantees when failures occur during sending or copying', async () => {

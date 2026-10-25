@@ -504,7 +504,7 @@ describe('PayTrack Bot /note Feature Test Suite', () => {
 
     // 9. Preserving note history when an invoice becomes Confirmed
     it('9. preserves note history when an invoice becomes Confirmed', async () => {
-      const { bot, txRepo, txService, distributor, sentMessages } = await setupTestContext();
+      const { bot, txRepo, txService, distributor, sentMessages, editedMessages } = await setupTestContext();
 
       const initialNotes: InvoiceNote[] = [
         { text: 'Confirmed test note', createdAt: '2026-10-22T01:30:00.000Z' },
@@ -553,16 +553,17 @@ describe('PayTrack Bot /note Feature Test Suite', () => {
       assert.equal(savedNotes.length, 1);
       assert.equal(savedNotes[0].text, 'Confirmed test note');
 
-      // Verify Confirmed header and Pending history message both display the notes
+      // Verify Confirmed header displays the notes
       const confirmedMsg = sentMessages.find((m) => m.message_thread_id === testConfig.confirmedTopicId);
       assert.ok(confirmedMsg);
       assert.match(confirmedMsg.text ?? confirmedMsg.caption, /📝 NOTES:/);
       assert.match(confirmedMsg.text ?? confirmedMsg.caption, /Confirmed test note/);
 
-      const historyMsg = sentMessages.find((m) => m.message_thread_id === testConfig.pendingTopicId);
-      assert.ok(historyMsg);
-      assert.match(historyMsg.text, /📝 NOTES:/);
-      assert.match(historyMsg.text, /Confirmed test note/);
+      // Verify Pending invoice was cleanly edited without duplicate status messages
+      const edited = editedMessages.find((e) => e.message_id === 8001);
+      assert.ok(edited);
+      assert.match(edited.text, /#INV/);
+      assert.match(edited.text, /✅ PAID/);
     });
 
     // 10. Handling Telegram edit failures without losing persisted notes

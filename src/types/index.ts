@@ -36,7 +36,33 @@ export interface UpdateDistributorInput {
 
 // ─── Transaction ─────────────────────────────────────────────
 
-export type TransactionStatus = 'PENDING' | 'PAID';
+export type TransactionStatus = 'PENDING' | 'PARTIALLY_PAID' | 'PAID';
+
+export interface Payment {
+  id: number;
+  transactionId: number;
+  amount: number;
+  currency: string;
+  paidAt: string;
+  paymentMessageId: number | null;
+  confirmedMessageId: number | null;
+  historyMessageId: number | null;
+  note: string | null;
+  createdAt: string;
+}
+
+export interface PaymentRow {
+  id: number;
+  transaction_id: number;
+  amount: number;
+  currency: string;
+  paid_at: string;
+  payment_message_id: number | null;
+  confirmed_message_id: number | null;
+  history_message_id: number | null;
+  note: string | null;
+  created_at: string;
+}
 
 export interface InvoiceNote {
   text: string;
@@ -125,4 +151,8 @@ export interface ConfirmationResult {
   confirmedMessageId?: number;
   pendingReceiptMessageId?: number;
   historyMessageId?: number;
+  status?: TransactionStatus;
+  paidAmount?: number;
+  cumulativePaid?: number;
+  remainingBalance?: number;
 }

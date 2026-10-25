@@ -8,8 +8,9 @@ import {
   parseInvoiceId,
   extractInvoiceIdFromText,
   parseInvoiceMetadataFromText,
+  parsePaidCommandPayload,
 } from '../helpers/format.helpers';
-import { getEffectiveRepliedMessage } from '../helpers/telegram.helpers';
+import { getEffectiveRepliedMessage, isCommand } from '../helpers/telegram.helpers';
 
 /**
  * Checks if a message represents the /paid (or /confirmed) command.
@@ -61,13 +62,18 @@ export function registerConfirmedHandler(
     // If not a /paid command, check if user uploaded receipt media as a reply without /paid
     // so we can give them an informative auto-deleting hint
     if (!isPaid) {
+      // If the message is ANY command (starts with /), DO NOT treat it as a receipt! Pass to next()!
+      if (isCommand(msg)) {
+        return next();
+      }
+
       const repliedMediaMsg = getEffectiveRepliedMessage(msg);
       if (repliedMediaMsg && ((msg.photo && msg.photo.length > 0) || msg.document)) {
         const senderId = ctx.from?.id;
         if (senderId && config.adminUserIds.includes(senderId)) {
           const chatId = String(ctx.chat.id);
           const targetTx = await transactionService.findByAnyMessageId(chatId, repliedMediaMsg.message_id);
-          if (targetTx && targetTx.status === 'PENDING') {
+          if (targetTx && targetTx.status !== 'PAID') {
             try {
               const hint = await ctx.reply(
                 `💡 Receipt received! To mark payment for ${formatInvoiceId(targetTx.id)}, add \`/paid\` in the caption or reply with \`/paid\`.`,
@@ -94,8 +100,7 @@ export function registerConfirmedHandler(
 
     const threadId = msg.message_thread_id ?? config.pendingTopicId;
     const text = (msg.text ?? msg.caption ?? '').trim();
-    const commandArg = text.replace(/^\/(paid|confirmed)(@\w+)?\s*/i, '').trim();
-    const explicitId = parseInvoiceId(commandArg);
+    const { explicitInvoiceId: explicitId, paymentAmount, userNote } = parsePaidCommandPayload(text);
 
     const chatId = String(ctx.chat.id);
     const repliedMsg = getEffectiveRepliedMessage(msg);
@@ -239,7 +244,7 @@ export function registerConfirmedHandler(
       return;
     }
 
-    if (transaction.status !== 'PENDING') {
+    if (transaction.status === 'PAID') {
       await ctx.reply(`❌ Transaction ${formatInvoiceId(transaction.id)} has already been paid.`, {
         message_thread_id: threadId,
       });
@@ -254,22 +259,29 @@ export function registerConfirmedHandler(
       transaction,
       commandMessageId,
       invoiceMsg,
-      paymentEvidenceMsg
+      paymentEvidenceMsg,
+      paymentAmount,
+      userNote
     );
 
     if (result.success) {
-      // Confirmation succeeded — send a brief confirmation that auto-deletes
-      try {
-        const successMsg = await ctx.reply(
-          `✅ Transaction ${formatInvoiceId(transaction.id)} paid.\n🔗 ${result.confirmationUrl}`,
-          { message_thread_id: threadId },
-        );
-        // Auto-delete the success message after 10 seconds (via waitUntil in Worker, or setTimeout in Node)
-        scheduleDelete(ctx, ctx.chat.id, successMsg.message_id, 10_000);
-      } catch {
-        /* ignore */
+      // If invoiceMsg was NOT in the thread (e.g. standalone /paid #INV0001), send brief confirmation
+      // If invoiceMsg was edited in place, the updated caption in Pending IS the confirmation (no duplicate status message!)
+      if (!invoiceMsg) {
+        try {
+          const statusText = result.status === 'PARTIALLY_PAID' ? 'partially paid' : 'paid';
+          const successMsg = await ctx.reply(
+            `✅ Transaction ${formatInvoiceId(transaction.id)} ${statusText}.\n🔗 ${result.confirmationUrl}`,
+            { message_thread_id: threadId }
+          );
+          // Auto-delete the success message after 10 seconds
+          scheduleDelete(ctx, ctx.chat.id, successMsg.message_id, 10_000);
+        } catch {
+          /* ignore */
+        }
       }
-    } else {
+    }
+ else {
       // Confirmation failed — originals are preserved
       await ctx.reply(
         `❌ Payment confirmation failed for ${formatInvoiceId(transaction.id)}.\n\n` +

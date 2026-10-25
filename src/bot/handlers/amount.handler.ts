@@ -1,11 +1,29 @@
 import type { Composer, Context } from 'grammy';
+import type { Message } from 'grammy/types';
 import { TransactionService } from '../../transactions/transaction.service';
 import { DistributorService } from '../../distributors/distributor.service';
 import { requireAdmin } from '../middleware/auth.middleware';
 import { getConfig, type Config } from '../../config/config';
-import { parseAmount } from '../helpers/format.helpers';
+import { parseAmount, formatAmount, formatInvoiceId } from '../helpers/format.helpers';
 import { copyAccountKeyboard } from '../keyboards/keyboards';
 import { getEffectiveRepliedMessage } from '../helpers/telegram.helpers';
+import { parseMeatInvoice } from '../../transactions/meat-invoice';
+
+/**
+ * Checks if a message represents the /amount command (text or caption).
+ */
+export function isAmountCommand(msg: Message): boolean {
+  const text = (msg.text ?? msg.caption ?? '').trim();
+  return /^\/amount(@\w+)?(\s|$)/i.test(text);
+}
+
+/**
+ * Checks if a message represents the /add command (text or caption).
+ */
+export function isAddCommand(msg: Message): boolean {
+  const text = (msg.text ?? msg.caption ?? '').trim();
+  return /^\/add(@\w+)?(\s|$)/i.test(text);
+}
 
 export function registerAmountHandler(
   bot: Composer<Context>,
@@ -15,94 +33,223 @@ export function registerAmountHandler(
 ): void {
   const config = customConfig ?? getConfig();
 
-  bot.command('amount', requireAdmin(customConfig), async (ctx) => {
+  bot.on('message', async (ctx, next) => {
     const msg = ctx.message;
-    if (!msg) return;
+    if (!msg) return next();
 
-    const threadId = msg.message_thread_id ?? config.pendingTopicId;
-    const repliedMsg = getEffectiveRepliedMessage(msg);
+    const isAmount = isAmountCommand(msg);
+    const isAdd = isAddCommand(msg);
 
-    // Must be a reply to a transaction message
-    if (!repliedMsg) {
-      await ctx.reply(
-        '❌ Reply to a transaction message with the amount.\n\nExample:\n/amount 280,700',
-        { message_thread_id: threadId },
-      );
-      return;
+    if (!isAmount && !isAdd) {
+      return next();
     }
 
-    // Parse the amount
-    const rawAmount = msg.text?.replace(/^\/amount\s*/i, '').trim();
-    if (!rawAmount) {
-      await ctx.reply('❌ Invalid amount.\n\nExample:\n/amount 280,700', {
-        message_thread_id: threadId,
-      });
-      return;
-    }
+    return requireAdmin(customConfig)(ctx, async () => {
+      const threadId = msg.message_thread_id ?? config.pendingTopicId;
+      const repliedMsg = getEffectiveRepliedMessage(msg);
+      const rawFullText = (msg.text ?? msg.caption ?? '').trim();
 
-    const amount = parseAmount(rawAmount);
-    if (amount === null) {
-      await ctx.reply('❌ Invalid amount.\n\nExample:\n/amount 280,700', {
-        message_thread_id: threadId,
-      });
-      return;
-    }
+      // ─── 1. /amount: Set transaction amount ─────────────────
+      if (isAmount) {
+        if (!repliedMsg) {
+          await ctx.reply(
+            '❌ Reply to a transaction message with the amount.\n\nExample:\n/amount 280,700',
+            { message_thread_id: threadId }
+          );
+          return;
+        }
 
-    const chatId = String(ctx.chat.id);
+        const rawAmount = rawFullText.replace(/^\/amount(@\w+)?\s*/i, '').trim();
+        if (!rawAmount) {
+          await ctx.reply('❌ Invalid amount.\n\nExample:\n/amount 280,700', {
+            message_thread_id: threadId,
+          });
+          return;
+        }
 
-    // Find transaction (check both original and bot message IDs)
-    let transaction = await transactionService.findByAnyMessageId(chatId, repliedMsg.message_id);
-    if (!transaction) {
-      try {
-        transaction = await transactionService.registerTransaction(
-          chatId, config.pendingTopicId, repliedMsg.message_id
+        const match = rawAmount.match(/^([₩\d,]+)(?:\s+([\s\S]*))?$/);
+        const amountToken = match ? match[1] : rawAmount;
+        const optionalNote = match && match[2] ? match[2].trim() : undefined;
+
+        let amount = parseAmount(amountToken);
+        if (amount === null) {
+          const parsedMeat = parseMeatInvoice(rawAmount);
+          if (parsedMeat.success && parsedMeat.invoice) {
+            amount = parsedMeat.invoice.grandTotal;
+          }
+        }
+
+        if (amount === null || amount <= 0) {
+          await ctx.reply('❌ Invalid amount.\n\nExample:\n/amount 280,700', {
+            message_thread_id: threadId,
+          });
+          return;
+        }
+
+        const chatId = String(ctx.chat.id);
+        let transaction = await transactionService.findByAnyMessageId(chatId, repliedMsg.message_id);
+        if (!transaction) {
+          try {
+            transaction = await transactionService.registerTransaction(
+              chatId,
+              config.pendingTopicId,
+              repliedMsg.message_id
+            );
+          } catch {
+            await ctx.reply('❌ Could not find or register this transaction.', {
+              message_thread_id: threadId,
+            });
+            return;
+          }
+        }
+
+        if (transaction.status !== 'PENDING') {
+          await ctx.reply('❌ This transaction has already been confirmed.', {
+            message_thread_id: threadId,
+          });
+          return;
+        }
+
+        await transactionService.setAmount(transaction.id, amount);
+        const updated = (await transactionService.findByAnyMessageId(chatId, repliedMsg.message_id))!;
+
+        const keyboard = updated.distributorSnapshot
+          ? copyAccountKeyboard(updated.distributorSnapshot.accountNumber)
+          : undefined;
+
+        const result = await transactionService.updateTransactionDisplay(
+          ctx.api,
+          ctx.chat.id,
+          config.pendingTopicId,
+          repliedMsg,
+          updated,
+          updated.distributorSnapshot,
+          updated.amount,
+          keyboard
         );
-      } catch {
-        await ctx.reply('❌ Could not find or register this transaction.', {
-          message_thread_id: threadId,
-        });
+
+        if ('error' in result) {
+          await ctx.reply(`❌ ${result.error}`, { message_thread_id: threadId });
+          return;
+        }
+
+        if (!msg.photo && !msg.document) {
+          try {
+            await ctx.deleteMessage();
+          } catch {
+            /* ignore */
+          }
+        }
         return;
       }
-    }
 
-    if (transaction.status !== 'PENDING') {
-      await ctx.reply('❌ This transaction has already been confirmed.', {
-        message_thread_id: threadId,
-      });
-      return;
-    }
+      // ─── 2. /add: Add to existing transaction amount ────────
+      if (isAdd) {
+        if (!repliedMsg) {
+          await ctx.reply(
+            '❌ Reply to a transaction message with the amount to add.\n\nExample:\n/add 50,000',
+            { message_thread_id: threadId }
+          );
+          return;
+        }
 
-    // Store the amount
-    await transactionService.setAmount(transaction.id, amount);
+        const rawAmount = rawFullText.replace(/^\/add(@\w+)?\s*/i, '').trim();
+        if (!rawAmount) {
+          await ctx.reply('❌ Invalid amount.\n\nExample:\n/add 50,000', {
+            message_thread_id: threadId,
+          });
+          return;
+        }
 
-    // Reload
-    const updated = (await transactionService.findByAnyMessageId(chatId, repliedMsg.message_id))!;
+        const match = rawAmount.match(/^([₩\d,]+)(?:\s+([\s\S]*))?$/);
+        const amountToken = match ? match[1] : rawAmount;
+        const optionalNote = match && match[2] ? match[2].trim() : undefined;
 
-    // Build keyboard if distributor is assigned
-    const keyboard = updated.distributorSnapshot
-      ? copyAccountKeyboard(updated.distributorSnapshot.accountNumber)
-      : undefined;
+        let addedAmount = parseAmount(amountToken);
+        if (addedAmount === null) {
+          const parsedMeat = parseMeatInvoice(rawAmount);
+          if (parsedMeat.success && parsedMeat.invoice) {
+            addedAmount = parsedMeat.invoice.grandTotal;
+          }
+        }
 
-    // Update the bot's message (or re-send if not bot-owned yet)
-    const result = await transactionService.updateTransactionDisplay(
-      ctx.api,
-      ctx.chat.id,
-      config.pendingTopicId,
-      repliedMsg,
-      updated,
-      updated.distributorSnapshot,
-      updated.amount,
-      keyboard,
-    );
+        if (addedAmount === null || addedAmount <= 0) {
+          await ctx.reply('❌ Invalid amount.\n\nExample:\n/add 50,000', {
+            message_thread_id: threadId,
+          });
+          return;
+        }
 
-    if ('error' in result) {
-      await ctx.reply(`❌ ${result.error}`, { message_thread_id: threadId });
-      return;
-    }
+        const chatId = String(ctx.chat.id);
+        let transaction = await transactionService.findByAnyMessageId(chatId, repliedMsg.message_id);
+        if (!transaction) {
+          try {
+            transaction = await transactionService.registerTransaction(
+              chatId,
+              config.pendingTopicId,
+              repliedMsg.message_id
+            );
+          } catch {
+            await ctx.reply('❌ Could not find or register this transaction.', {
+              message_thread_id: threadId,
+            });
+            return;
+          }
+        }
 
-    // Delete the /amount command message
-    try {
-      await ctx.deleteMessage();
-    } catch { /* ignore */ }
+        if (transaction.status !== 'PENDING') {
+          await ctx.reply('❌ This transaction has already been confirmed.', {
+            message_thread_id: threadId,
+          });
+          return;
+        }
+
+        const currentAmount = transaction.amount ?? 0;
+        const newTotalAmount = currentAmount + addedAmount;
+        await transactionService.setAmount(transaction.id, newTotalAmount);
+
+        const updated = (await transactionService.findByAnyMessageId(chatId, repliedMsg.message_id))!;
+
+        const keyboard = updated.distributorSnapshot
+          ? copyAccountKeyboard(updated.distributorSnapshot.accountNumber)
+          : undefined;
+
+        const result = await transactionService.updateTransactionDisplay(
+          ctx.api,
+          ctx.chat.id,
+          config.pendingTopicId,
+          repliedMsg,
+          updated,
+          updated.distributorSnapshot,
+          updated.amount,
+          keyboard
+        );
+
+        if ('error' in result) {
+          await ctx.reply(`❌ ${result.error}`, { message_thread_id: threadId });
+          return;
+        }
+
+        if (msg.photo || msg.document) {
+          // If media invoice was uploaded with /add, preserve the media and send a clear confirmation
+          try {
+            await ctx.reply(
+              `✅ Added ${formatAmount(addedAmount)} to ${formatInvoiceId(transaction.id)} (New total: ${formatAmount(newTotalAmount)}).`,
+              { message_thread_id: threadId }
+            );
+          } catch {
+            /* ignore */
+          }
+        } else {
+          // Pure text command: delete to keep Pending clean
+          try {
+            await ctx.deleteMessage();
+          } catch {
+            /* ignore */
+          }
+        }
+        return;
+      }
+    });
   });
 }

@@ -1,6 +1,6 @@
 import { getDatabase } from '../database/database';
 import { IDatabase, SqliteDatabaseAdapter } from '../database/adapter';
-import type { TransactionRow } from '../types';
+import type { TransactionRow, PaymentRow } from '../types';
 
 export class TransactionRepository {
   private db: IDatabase;
@@ -160,7 +160,7 @@ export class TransactionRepository {
 
   /**
    * Marks a transaction as PAID. Returns true if the status was actually
-   * changed from PENDING → PAID (i.e. the row existed and was still PENDING).
+   * changed from PENDING/PARTIALLY_PAID → PAID.
    * This serves as the concurrency-safe "compare-and-swap" for confirmation.
    */
   async markPaid(
@@ -179,7 +179,7 @@ export class TransactionRepository {
            confirmation_message_id = ?,
            confirmation_url = ?,
            history_message_id = ?
-       WHERE id = ? AND status = 'PENDING'`,
+       WHERE id = ? AND status IN ('PENDING', 'PARTIALLY_PAID')`,
       [
         paidAt,
         paymentMessageId,
@@ -190,6 +190,96 @@ export class TransactionRepository {
       ]
     );
     return result.changes > 0;
+  }
+
+  async updateTransactionPaymentStatus(params: {
+    id: number;
+    status: 'PARTIALLY_PAID' | 'PAID';
+    paidAt: string;
+    paymentMessageId?: number | null;
+    confirmationMessageId?: number | null;
+    confirmationUrl?: string | null;
+    historyMessageId?: number | null;
+    allowFromStatuses?: string[];
+  }): Promise<boolean> {
+    const allowStatuses = params.allowFromStatuses ?? ['PENDING', 'PARTIALLY_PAID'];
+    const placeholders = allowStatuses.map(() => '?').join(', ');
+    const result = await this.db.exec(
+      `UPDATE transactions
+       SET status = ?,
+           paid_at = ?,
+           payment_message_id = COALESCE(?, payment_message_id),
+           confirmation_message_id = COALESCE(?, confirmation_message_id),
+           confirmation_url = COALESCE(?, confirmation_url),
+           history_message_id = COALESCE(?, history_message_id)
+       WHERE id = ? AND status IN (${placeholders})`,
+      [
+        params.status,
+        params.paidAt,
+        params.paymentMessageId ?? null,
+        params.confirmationMessageId ?? null,
+        params.confirmationUrl ?? null,
+        params.historyMessageId ?? null,
+        params.id,
+        ...allowStatuses,
+      ]
+    );
+    return result.changes > 0;
+  }
+
+  async recordPayment(
+    transactionId: number,
+    amount: number,
+    paidAt: string,
+    paymentMessageId: number | null,
+    confirmedMessageId: number | null,
+    historyMessageId: number | null,
+    note?: string | null
+  ): Promise<PaymentRow> {
+    const result = await this.db.exec(
+      `INSERT INTO payments (transaction_id, amount, paid_at, payment_message_id, confirmed_message_id, history_message_id, note)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [
+        transactionId,
+        amount,
+        paidAt,
+        paymentMessageId ?? null,
+        confirmedMessageId ?? null,
+        historyMessageId ?? null,
+        note ?? null,
+      ]
+    );
+    const row = await this.db.first<PaymentRow>(
+      'SELECT * FROM payments WHERE id = ?',
+      [result.lastInsertRowid as number]
+    );
+    return row!;
+  }
+
+  async getPayments(transactionId: number): Promise<PaymentRow[]> {
+    return this.db.query<PaymentRow>(
+      'SELECT * FROM payments WHERE transaction_id = ? ORDER BY id ASC',
+      [transactionId]
+    );
+  }
+
+  async getTotalPaid(transactionId: number): Promise<number> {
+    const row = await this.db.first<{ total: number }>(
+      'SELECT COALESCE(SUM(amount), 0) as total FROM payments WHERE transaction_id = ?',
+      [transactionId]
+    );
+    return row?.total ?? 0;
+  }
+
+  async findPaymentByMessageId(
+    transactionId: number,
+    paymentMessageId: number
+  ): Promise<PaymentRow | undefined> {
+    const row = await this.db.first<PaymentRow>(
+      'SELECT * FROM payments WHERE transaction_id = ? AND payment_message_id = ?',
+      [transactionId, paymentMessageId]
+    );
+    return row ?? undefined;
   }
 
   async updateMetadataMessageId(id: number, metadataMessageId: number): Promise<void> {

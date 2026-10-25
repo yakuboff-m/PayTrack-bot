@@ -179,6 +179,97 @@ export function parseAmount(input: string): number | null {
 }
 
 /**
+ * Payload extracted from /paid or /confirmed command messages.
+ */
+export interface PaidCommandPayload {
+  explicitInvoiceId: number | null;
+  paymentAmount: number | null;
+  userNote: string | null;
+}
+
+/**
+ * Parses /paid or /confirmed command arguments.
+ * Distinguishes optional invoice ID (#INV0001 or 1), optional payment amount (50,000 or ₩50,000),
+ * and optional payment note.
+ */
+export function parsePaidCommandPayload(text: string): PaidCommandPayload {
+  let cleaned = text.replace(/^\/(?:paid|confirmed)(?:@\w+)?\s*/i, '').trim();
+  if (!cleaned) {
+    return { explicitInvoiceId: null, paymentAmount: null, userNote: null };
+  }
+
+  // 1. Extract note directive if present (/note <text> or Note: <text>)
+  const { cleanText, note: extractedNote } = extractNoteFromText(cleaned);
+  cleaned = cleanText;
+  let userNote = extractedNote;
+
+  let explicitInvoiceId: number | null = null;
+  let paymentAmount: number | null = null;
+
+  // 2. Check for explicit invoice ID with prefix: 🆔, #INV..., INV..., #...
+  const invoicePrefixMatch = cleaned.match(/(?:^|\s)(?:🆔\s*)?(?:#INV-?|INV-?|#)(\d+)\b/i);
+  if (invoicePrefixMatch && invoicePrefixMatch.index !== undefined) {
+    explicitInvoiceId = parseInt(invoicePrefixMatch[1], 10);
+    cleaned = (
+      cleaned.substring(0, invoicePrefixMatch.index) +
+      ' ' +
+      cleaned.substring(invoicePrefixMatch.index + invoicePrefixMatch[0].length)
+    ).trim();
+  }
+
+  // 3. Check for amount with currency symbol or commas: e.g. ₩50,000, 50,000, ₩50000
+  const formattedAmountMatch = cleaned.match(
+    /(?:^|\s)(?:₩\s*)?(\d{1,3}(?:,\d{3})+|\d+)\s*(?:KRW|원)?(?:\s|$)/i
+  );
+  if (formattedAmountMatch && formattedAmountMatch.index !== undefined) {
+    const rawVal = formattedAmountMatch[1].replace(/,/g, '');
+    const num = parseInt(rawVal, 10);
+    const hasCommaOrCurrency =
+      formattedAmountMatch[0].includes(',') ||
+      formattedAmountMatch[0].includes('₩') ||
+      /KRW|원/i.test(formattedAmountMatch[0]);
+    if (hasCommaOrCurrency || num >= 1000 || explicitInvoiceId !== null) {
+      paymentAmount = num;
+      cleaned = (
+        cleaned.substring(0, formattedAmountMatch.index) +
+        ' ' +
+        cleaned.substring(formattedAmountMatch.index + formattedAmountMatch[0].length)
+      ).trim();
+    }
+  }
+
+  // 4. If neither or only one found, check remaining tokens
+  const tokens = cleaned.split(/\s+/).filter(Boolean);
+  const remainingTokens: string[] = [];
+
+  for (const token of tokens) {
+    const parsedNum = parseAmount(token);
+    if (parsedNum !== null && paymentAmount === null && explicitInvoiceId !== null) {
+      paymentAmount = parsedNum;
+    } else if (parsedNum !== null && explicitInvoiceId === null && paymentAmount === null) {
+      if (token.includes(',') || parsedNum >= 1000) {
+        paymentAmount = parsedNum;
+      } else {
+        explicitInvoiceId = parsedNum;
+      }
+    } else {
+      remainingTokens.push(token);
+    }
+  }
+
+  if (remainingTokens.length > 0) {
+    const leftoverText = remainingTokens.join(' ').trim();
+    userNote = userNote ? `${userNote} ${leftoverText}` : leftoverText;
+  }
+
+  return {
+    explicitInvoiceId,
+    paymentAmount,
+    userNote: userNote || null,
+  };
+}
+
+/**
  * Builds the metadata block for the bot's transaction message caption.
  * Every line has an emoji prefix for visual richness, with unique invoice ID at the top.
  */
@@ -187,7 +278,11 @@ export function buildMetadataBlock(
   amount: number | null,
   receivedAt?: string,
   invoiceId?: number,
-  notes?: InvoiceNote[]
+  notes?: InvoiceNote[],
+  paymentProgress?: {
+    cumulativePaid: number;
+    remainingBalance: number;
+  }
 ): string {
   const lines: string[] = [METADATA_SEPARATOR];
 
@@ -206,6 +301,11 @@ export function buildMetadataBlock(
     lines.push(`💰 ${formatAmount(amount)}`);
   }
 
+  if (paymentProgress) {
+    lines.push(`💵 Paid: ${formatAmount(paymentProgress.cumulativePaid)}`);
+    lines.push(`⚖️ Balance Due: ${formatAmount(paymentProgress.remainingBalance)}`);
+  }
+
   if (receivedAt) {
     lines.push(`📅 ${formatTimestamp(receivedAt)}`);
   }
@@ -220,6 +320,47 @@ export function buildMetadataBlock(
 }
 
 /**
+ * Formats the cleaned caption for the original invoice message in the Pending topic.
+ * As required by Bug 2:
+ * Preserves ONLY the invoice number/ID from the original caption, followed by the
+ * appropriate payment/status text, removing everything else (no unwanted manual-deletion text).
+ */
+export function formatCleanedPendingInvoiceCaption(
+  invoiceId: number,
+  status: 'PAID' | 'PARTIALLY_PAID',
+  confirmationUrl?: string,
+  cumulativePaid?: number | null,
+  totalAmount?: number | null,
+  remainingBalance?: number | null
+): string {
+  const idStr = formatInvoiceId(invoiceId);
+  if (status === 'PAID') {
+    const lines = [`🆔 ${idStr} • ✅ PAID`];
+    if (confirmationUrl) {
+      lines.push(`🔗 Confirmation: ${confirmationUrl}`);
+    }
+    return lines.join('\n');
+  } else {
+    const lines = [`🆔 ${idStr} • ⏳ PARTIALLY PAID`];
+    if (
+      totalAmount !== null &&
+      totalAmount !== undefined &&
+      cumulativePaid !== null &&
+      cumulativePaid !== undefined
+    ) {
+      lines.push(`💰 Paid: ${formatAmount(cumulativePaid)} / ${formatAmount(totalAmount)}`);
+    }
+    if (remainingBalance !== null && remainingBalance !== undefined && remainingBalance > 0) {
+      lines.push(`⚖️ Balance Due: ${formatAmount(remainingBalance)}`);
+    }
+    if (confirmationUrl) {
+      lines.push(`🔗 Receipt: ${confirmationUrl}`);
+    }
+    return lines.join('\n');
+  }
+}
+
+/**
  * Formats the PAID header message sent to the Confirmed topic.
  */
 export function formatConfirmedHeader(
@@ -229,14 +370,40 @@ export function formatConfirmedHeader(
   paidAt: string,
   invoiceId?: number,
   note?: string,
-  notes?: InvoiceNote[]
+  notes?: InvoiceNote[],
+  paymentDetails?: {
+    status?: 'PAID' | 'PARTIALLY_PAID';
+    paymentAmount?: number | null;
+    cumulativePaid?: number | null;
+    remainingBalance?: number | null;
+  }
 ): string {
+  const isPartial = paymentDetails?.status === 'PARTIALLY_PAID';
   const lines: string[] = [];
   lines.push('━━━━━━━━━━━━');
-  lines.push(invoiceId ? `✅ PAID • ${formatInvoiceId(invoiceId)}` : '✅ PAID');
+  if (isPartial) {
+    lines.push(invoiceId ? `⏳ PARTIALLY PAID • ${formatInvoiceId(invoiceId)}` : '⏳ PARTIALLY PAID');
+  } else {
+    lines.push(invoiceId ? `✅ PAID • ${formatInvoiceId(invoiceId)}` : '✅ PAID');
+  }
   lines.push('');
   lines.push(`🏢 ${distributorName ?? 'Not specified'}`);
-  lines.push(`💰 ${amount !== null ? formatAmount(amount) : 'Not specified'}`);
+  lines.push(`💰 Total: ${amount !== null ? formatAmount(amount) : 'Not specified'}`);
+
+  if (paymentDetails?.paymentAmount !== undefined && paymentDetails.paymentAmount !== null) {
+    lines.push(`💵 Payment: ${formatAmount(paymentDetails.paymentAmount)}`);
+  }
+  if (paymentDetails?.cumulativePaid !== undefined && paymentDetails.cumulativePaid !== null) {
+    lines.push(`📊 Total Paid: ${formatAmount(paymentDetails.cumulativePaid)}`);
+  }
+  if (
+    paymentDetails?.remainingBalance !== undefined &&
+    paymentDetails.remainingBalance !== null &&
+    isPartial
+  ) {
+    lines.push(`⚖️ Remaining Balance: ${formatAmount(paymentDetails.remainingBalance)}`);
+  }
+
   lines.push('');
   lines.push(`📥 Received: ${formatTimestamp(receivedAt)}`);
   lines.push(`💸 Paid: ${formatTimestamp(paidAt)}`);
@@ -266,14 +433,40 @@ export function formatHistoryRecord(
   confirmationUrl: string,
   invoiceId?: number,
   note?: string,
-  notes?: InvoiceNote[]
+  notes?: InvoiceNote[],
+  paymentDetails?: {
+    status?: 'PAID' | 'PARTIALLY_PAID';
+    paymentAmount?: number | null;
+    cumulativePaid?: number | null;
+    remainingBalance?: number | null;
+  }
 ): string {
+  const isPartial = paymentDetails?.status === 'PARTIALLY_PAID';
   const lines: string[] = [];
   lines.push('━━━━━━━━━━━━');
-  lines.push(invoiceId ? `✅ PAID • ${formatInvoiceId(invoiceId)}` : '✅ PAID');
+  if (isPartial) {
+    lines.push(invoiceId ? `⏳ PARTIALLY PAID • ${formatInvoiceId(invoiceId)}` : '⏳ PARTIALLY PAID');
+  } else {
+    lines.push(invoiceId ? `✅ PAID • ${formatInvoiceId(invoiceId)}` : '✅ PAID');
+  }
   lines.push('');
   lines.push(`🏢 ${distributorName ?? 'Not specified'}`);
-  lines.push(`💰 ${amount !== null ? formatAmount(amount) : 'Not specified'}`);
+  lines.push(`💰 Total: ${amount !== null ? formatAmount(amount) : 'Not specified'}`);
+
+  if (paymentDetails?.paymentAmount !== undefined && paymentDetails.paymentAmount !== null) {
+    lines.push(`💵 Payment: ${formatAmount(paymentDetails.paymentAmount)}`);
+  }
+  if (paymentDetails?.cumulativePaid !== undefined && paymentDetails.cumulativePaid !== null) {
+    lines.push(`📊 Total Paid: ${formatAmount(paymentDetails.cumulativePaid)}`);
+  }
+  if (
+    paymentDetails?.remainingBalance !== undefined &&
+    paymentDetails.remainingBalance !== null &&
+    isPartial
+  ) {
+    lines.push(`⚖️ Remaining Balance: ${formatAmount(paymentDetails.remainingBalance)}`);
+  }
+
   lines.push('');
   lines.push(`📥 Received: ${formatTimestamp(receivedAt)}`);
   lines.push(`💸 Paid: ${formatTimestamp(paidAt)}`);

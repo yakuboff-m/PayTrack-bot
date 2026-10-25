@@ -142,60 +142,33 @@ export function isReply(msg: Message): boolean {
 export const MAX_TEXT_LENGTH = 4096;
 export const MAX_CAPTION_LENGTH = 1024;
 
-/** Notice appended to original Pending invoice messages when payment is confirmed */
-export const MANUAL_DELETION_NOTICE = '⚠️ Should be deleted manually!';
-
-export interface ManualDeletionNoticeResult {
-  text: string;
-  appended: boolean;
-  overflow: boolean;
-}
-
 /**
- * Appends the manual deletion notice to an existing message text or caption.
- * - Idempotent: If notice is already present, does not append it again.
- * - Non-destructive: NEVER truncates original invoice content. If the content + notice
- *   exceeds maxLen, keeps the original content intact and marks overflow: true so the
- *   warning can be dispatched as a separate reply/message.
+ * Cleans the original invoice caption/text by preserving ONLY the invoice identifier
+ * and appending the new payment/status text, removing everything else (no unwanted manual-deletion text).
  */
-export function appendManualDeletionNotice(
-  content: string,
-  maxLen: number = MAX_TEXT_LENGTH
-): ManualDeletionNoticeResult {
-  const trimmed = content.trim();
-  if (!trimmed) {
-    return {
-      text: MANUAL_DELETION_NOTICE,
-      appended: true,
-      overflow: false,
-    };
+export function cleanInvoiceCaption(
+  originalCaptionOrText: string,
+  statusText: string,
+  maxLen: number = MAX_CAPTION_LENGTH
+): string {
+  const invoiceIdMatch =
+    originalCaptionOrText.match(/(?:🆔\s*)?#?INV-?\d+\b/i) ||
+    originalCaptionOrText.match(/(?:^|[^\w])#\d+\b/);
+  const idPrefix = invoiceIdMatch ? invoiceIdMatch[0].trim() : '';
+
+  let cleaned: string;
+  if (idPrefix) {
+    cleaned = idPrefix.startsWith('🆔')
+      ? `${idPrefix} • ${statusText}`
+      : `🆔 ${idPrefix} • ${statusText}`;
+  } else {
+    cleaned = statusText;
   }
 
-  // Idempotence check: do not duplicate the notice
-  if (trimmed.includes(MANUAL_DELETION_NOTICE)) {
-    return {
-      text: trimmed,
-      appended: true,
-      overflow: false,
-    };
+  if (cleaned.length <= maxLen) {
+    return cleaned;
   }
-
-  const combined = `${trimmed}\n\n${MANUAL_DELETION_NOTICE}`;
-  if (combined.length <= maxLen) {
-    return {
-      text: combined,
-      appended: true,
-      overflow: false,
-    };
-  }
-
-  // Insufficient room: NEVER truncate original invoice content!
-  // Return original content intact with overflow flag so caller can send warning separately.
-  return {
-    text: trimmed,
-    appended: false,
-    overflow: true,
-  };
+  return cleaned.substring(0, maxLen);
 }
 
 /**
