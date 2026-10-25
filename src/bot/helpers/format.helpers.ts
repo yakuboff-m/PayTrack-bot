@@ -653,7 +653,61 @@ export function formatCleanedPendingInvoiceCaption(
 }
 
 /**
- * Formats the PAID header message sent to the Confirmed topic.
+ * Formats the identifiable caption for receipt media copied to Confirmed topic,
+ * ensuring no orphaned, unidentifiable media records are ever created.
+ */
+export function formatReceiptCaption(params: {
+  invoiceId: number;
+  distributorName: string | null;
+  bankDetails?: string | null;
+  originalAmount?: number | null;
+  additionsTotal?: number | null;
+  currentInvoiceTotal?: number | null;
+  paymentAmount: number;
+  cumulativePaid: number;
+  remainingBalance: number;
+  status: 'PARTIALLY_PAID' | 'PAID';
+  paidAt: string;
+  note?: string;
+}): string {
+  const isPartial = params.status === 'PARTIALLY_PAID';
+  const statusStr = isPartial ? '⏳ PARTIALLY PAID' : '✅ PAID';
+  const lines: string[] = [];
+
+  if (params.note) {
+    lines.push(`🧾 Payment Receipt: ${params.note} • ${formatInvoiceId(params.invoiceId)}`);
+  } else {
+    lines.push(`🧾 Payment Receipt • ${formatInvoiceId(params.invoiceId)}`);
+  }
+
+  if (params.distributorName) {
+    const bankStr = params.bankDetails ? ` • ${params.bankDetails}` : '';
+    lines.push(`🏢 ${params.distributorName}${bankStr}`);
+  }
+
+  if (params.originalAmount !== undefined && params.originalAmount !== null) {
+    const addStr =
+      params.additionsTotal && params.additionsTotal > 0
+        ? ` | ➕ Additions: ${formatAmount(params.additionsTotal)}`
+        : '';
+    lines.push(`📥 Original: ${formatAmount(params.originalAmount)}${addStr}`);
+  }
+
+  if (params.currentInvoiceTotal !== undefined && params.currentInvoiceTotal !== null) {
+    lines.push(`💰 Invoice Total: ${formatAmount(params.currentInvoiceTotal)}`);
+  }
+
+  lines.push(`💵 Amount Received: ${formatAmount(params.paymentAmount)}`);
+  lines.push(`📊 Total Paid: ${formatAmount(params.cumulativePaid)}`);
+  lines.push(`⚖️ Remaining Balance: ${formatAmount(params.remainingBalance)}`);
+  lines.push(`⏳ Status: ${statusStr}`);
+  lines.push(`💸 Paid At: ${formatTimestamp(params.paidAt)}`);
+
+  return lines.join('\n');
+}
+
+/**
+ * Formats the confirmation record message sent to the Confirmed topic.
  */
 export function formatConfirmedHeader(
   distributorName: string | null,
@@ -668,11 +722,14 @@ export function formatConfirmedHeader(
     paymentAmount?: number | null;
     cumulativePaid?: number | null;
     remainingBalance?: number | null;
+    originalAmount?: number | null;
+    additionsTotal?: number | null;
+    bankDetails?: string | null;
+    receiptUrl?: string | null;
   }
 ): string {
   const isPartial = paymentDetails?.status === 'PARTIALLY_PAID';
-  const lines: string[] = [];
-  lines.push('━━━━━━━━━━━━');
+  const lines: string[] = ['━━━━━━━━━━━━'];
   if (isPartial) {
     lines.push(invoiceId ? `⏳ PARTIALLY PAID • ${formatInvoiceId(invoiceId)}` : '⏳ PARTIALLY PAID');
   } else {
@@ -680,8 +737,30 @@ export function formatConfirmedHeader(
   }
   lines.push('');
   lines.push(`🏢 ${distributorName ?? 'Not specified'}`);
-  lines.push(`💰 Total: ${amount !== null ? formatAmount(amount) : 'Not specified'}`);
+  if (paymentDetails?.bankDetails) {
+    lines.push(`🏦 ${paymentDetails.bankDetails}`);
+  }
 
+  // Invoice amounts breakdown
+  if (paymentDetails?.originalAmount !== undefined && paymentDetails.originalAmount !== null) {
+    lines.push(`📥 Original Invoice: ${formatAmount(paymentDetails.originalAmount)}`);
+  }
+  if (
+    paymentDetails?.additionsTotal !== undefined &&
+    paymentDetails.additionsTotal !== null &&
+    paymentDetails.additionsTotal > 0
+  ) {
+    lines.push(`➕ Total Added: ${formatAmount(paymentDetails.additionsTotal)}`);
+  }
+  if (amount !== null) {
+    if (paymentDetails?.additionsTotal && paymentDetails.additionsTotal > 0) {
+      lines.push(`💰 Updated Total: ${formatAmount(amount)}`);
+    } else {
+      lines.push(`💰 Total: ${formatAmount(amount)}`);
+    }
+  }
+
+  lines.push('');
   if (paymentDetails?.paymentAmount !== undefined && paymentDetails.paymentAmount !== null) {
     lines.push(`💵 Payment: ${formatAmount(paymentDetails.paymentAmount)}`);
   }
@@ -690,8 +769,7 @@ export function formatConfirmedHeader(
   }
   if (
     paymentDetails?.remainingBalance !== undefined &&
-    paymentDetails.remainingBalance !== null &&
-    isPartial
+    paymentDetails.remainingBalance !== null
   ) {
     lines.push(`⚖️ Remaining Balance: ${formatAmount(paymentDetails.remainingBalance)}`);
   }
@@ -709,8 +787,13 @@ export function formatConfirmedHeader(
     lines.push('');
     lines.push(`📝 Payment Note: ${note}`);
   }
-  lines.push('━━━━━━━━━━━━');
 
+  if (paymentDetails?.receiptUrl) {
+    lines.push('');
+    lines.push(`🧾 Receipt: [View payment receipt](${paymentDetails.receiptUrl})`);
+  }
+
+  lines.push('━━━━━━━━━━━━');
   return lines.join('\n');
 }
 

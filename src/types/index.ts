@@ -48,6 +48,8 @@ export interface Payment {
   confirmedMessageId: number | null;
   receiptMessageId?: number | null;
   receiptUrl?: string | null;
+  cumulativePaid?: number | null;
+  balanceDue?: number | null;
   historyMessageId: number | null;
   note: string | null;
   createdAt: string;
@@ -63,6 +65,8 @@ export interface PaymentRow {
   confirmed_message_id: number | null;
   receipt_message_id?: number | null;
   receipt_url?: string | null;
+  cumulative_paid?: number | null;
+  balance_due?: number | null;
   history_message_id: number | null;
   note: string | null;
   created_at: string;

@@ -1274,8 +1274,9 @@ describe('Regression: /paid with Receipt Image and #INV0009', () => {
       assert.ok(album.media[0].caption.length <= 1024);
       assert.match(album.media[0].caption, /✅ PAID/);
 
-      // Item 1 preserves payment evidence caption
-      assert.equal(album.media[1].caption, '🧾 Payment Receipt: Paid via KakaoPay');
+      // Item 1 preserves payment evidence caption with invoice details
+      assert.match(album.media[1].caption, /🧾 Payment Receipt: Paid via KakaoPay/);
+      assert.match(album.media[1].caption, /#INV0001/);
 
       // Overflow message was sent as follow-up in Confirmed topic
       const followUpMsgs = sentMessages.filter((m) => m.message_thread_id === testConfig.confirmedTopicId);

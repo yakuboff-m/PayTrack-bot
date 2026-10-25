@@ -66,6 +66,8 @@ CREATE TABLE IF NOT EXISTS payments (
   confirmed_message_id    INTEGER,
   receipt_message_id      INTEGER,
   receipt_url             TEXT,
+  cumulative_paid         INTEGER,
+  balance_due             INTEGER,
   history_message_id      INTEGER,
   note                    TEXT,
   created_at              TEXT NOT NULL DEFAULT (datetime('now')),

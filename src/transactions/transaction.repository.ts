@@ -249,11 +249,13 @@ export class TransactionRepository {
     historyMessageId: number | null,
     note?: string | null,
     receiptMessageId?: number | null,
-    receiptUrl?: string | null
+    receiptUrl?: string | null,
+    cumulativePaid?: number | null,
+    balanceDue?: number | null
   ): Promise<PaymentRow> {
     const result = await this.db.exec(
-      `INSERT INTO payments (transaction_id, amount, paid_at, payment_message_id, confirmed_message_id, receipt_message_id, receipt_url, history_message_id, note)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO payments (transaction_id, amount, paid_at, payment_message_id, confirmed_message_id, receipt_message_id, receipt_url, history_message_id, note, cumulative_paid, balance_due)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         transactionId,
         amount,
@@ -264,6 +266,8 @@ export class TransactionRepository {
         receiptUrl ?? null,
         historyMessageId ?? null,
         note ?? null,
+        cumulativePaid ?? null,
+        balanceDue ?? null,
       ]
     );
     const row = await this.db.first<PaymentRow>(

@@ -23,6 +23,7 @@ import {
   formatInvoiceId,
   formatCleanedPendingInvoiceCaption,
   formatSupersededInvoiceCaption,
+  formatReceiptCaption,
   parsePaidCommandPayload,
   nowISO,
 } from '../bot/helpers/format.helpers';
@@ -657,6 +658,28 @@ export class TransactionService {
           ? 'PAID'
           : 'PARTIALLY_PAID';
 
+      // Get additions breakdown if available
+      let additionsTotal = 0;
+      if (typeof this.repo.getAdditions === 'function') {
+        const additions = await this.repo.getAdditions(transaction.id);
+        additionsTotal = additions.reduce((sum, a) => sum + a.amount, 0);
+      }
+      const originalAmount =
+        transaction.initialAmount ??
+        (transaction.amount !== null ? Math.max(0, transaction.amount - additionsTotal) : null);
+
+      // Distributor bank details
+      let bankDetails: string | null = null;
+      if (
+        transaction.distributorSnapshot?.bankName &&
+        transaction.distributorSnapshot?.accountNumber
+      ) {
+        bankDetails = `${transaction.distributorSnapshot.bankName} ${transaction.distributorSnapshot.accountNumber}`;
+        if (transaction.distributorSnapshot.accountHolder) {
+          bankDetails += ` (${transaction.distributorSnapshot.accountHolder})`;
+        }
+      }
+
       // ── Phase 1: Create confirmation in Confirmed topic ────
       const headerText = formatConfirmedHeader(
         distributorName,
@@ -671,8 +694,26 @@ export class TransactionService {
           paymentAmount: payAmount,
           cumulativePaid,
           remainingBalance,
+          originalAmount,
+          additionsTotal,
+          bankDetails,
         }
       );
+
+      const receiptCaption = formatReceiptCaption({
+        invoiceId: transaction.id,
+        distributorName,
+        bankDetails,
+        originalAmount,
+        additionsTotal,
+        currentInvoiceTotal: transaction.amount,
+        paymentAmount: payAmount,
+        cumulativePaid,
+        remainingBalance,
+        status: newStatus,
+        paidAt,
+        note: effectiveNote,
+      });
 
       // Extract original invoice content (preserving item breakdown, text, or captions)
       const invoiceRawText = invoiceMsg?.text ?? invoiceMsg?.caption ?? '';
@@ -698,9 +739,36 @@ export class TransactionService {
       const invoiceDoc = invoiceMsg?.document?.file_id ?? null;
       const paymentDoc = paymentEvidenceMsg?.document?.file_id ?? null;
 
+      const isSubsequentPayment = previousTotalPaid > 0 || !!transaction.confirmationMessageId;
       let effectiveReceiptMsgId: number | null = null;
       try {
-        if (invoicePhoto && paymentPhoto) {
+        if (isSubsequentPayment) {
+          // SUBSEQUENT PAYMENT: Do not create redundant copies of the invoice message in Confirmed.
+          // Post the receipt media with receiptCaption containing full financial context, replying to the primary confirmation.
+          const replyToId = transaction.confirmationMessageId ?? undefined;
+          if (paymentEvidenceMsg && paymentEvidenceMsg.message_id !== invoiceMessageId && (paymentPhoto || paymentDoc)) {
+            const copiedEvidence = await api.copyMessage(
+              chatId,
+              chatId,
+              paymentEvidenceMsg.message_id,
+              {
+                message_thread_id: config.confirmedTopicId,
+                caption: receiptCaption,
+                ...(replyToId ? { reply_to_message_id: replyToId } : {}),
+              }
+            );
+            confirmedMsgId = copiedEvidence.message_id;
+            effectiveReceiptMsgId = copiedEvidence.message_id;
+          } else {
+            // Text receipt or text payment command: send confirmation header text replying to primary confirmation
+            const sent = await api.sendMessage(chatId, headerText, {
+              message_thread_id: config.confirmedTopicId,
+              ...(replyToId ? { reply_to_message_id: replyToId } : {}),
+            });
+            confirmedMsgId = sent.message_id;
+            effectiveReceiptMsgId = sent.message_id;
+          }
+        } else if (invoicePhoto && paymentPhoto) {
           // Both are photos: send TOGETHER as ONE media group (album)
           const caption =
             combinedConfirmedText.length <= MAX_CAPTION_LENGTH
@@ -717,7 +785,7 @@ export class TransactionService {
               {
                 type: 'photo',
                 media: paymentPhoto,
-                caption: effectiveNote ? `🧾 Payment Receipt: ${effectiveNote}` : '🧾 Payment Receipt',
+                caption: receiptCaption,
               },
             ],
             { message_thread_id: config.confirmedTopicId }
@@ -754,7 +822,7 @@ export class TransactionService {
               {
                 type: 'document',
                 media: paymentDoc,
-                caption: effectiveNote ? `🧾 Payment Receipt: ${effectiveNote}` : '🧾 Payment Receipt',
+                caption: receiptCaption,
               },
             ],
             { message_thread_id: config.confirmedTopicId }
@@ -792,18 +860,17 @@ export class TransactionService {
           // If there is payment evidence (photo, doc, or text receipt), copy it into Confirmed
           if (paymentEvidenceMsg && paymentEvidenceMsg.message_id !== invoiceMessageId) {
             if (paymentPhoto || paymentDoc) {
-              const receiptCaption = effectiveNote
-                ? `🧾 Payment Receipt: ${effectiveNote}`
-                : '🧾 Payment Receipt';
               const copied = await api.copyMessage(chatId, chatId, paymentEvidenceMsg.message_id, {
                 message_thread_id: config.confirmedTopicId,
                 caption: receiptCaption,
+                reply_to_message_id: confirmedMsgId,
               });
               additionalConfirmedMsgIds.push(copied.message_id);
               effectiveReceiptMsgId = copied.message_id;
             } else {
               const copied = await api.copyMessage(chatId, chatId, paymentEvidenceMsg.message_id, {
                 message_thread_id: config.confirmedTopicId,
+                reply_to_message_id: confirmedMsgId,
               });
               additionalConfirmedMsgIds.push(copied.message_id);
               effectiveReceiptMsgId = copied.message_id;
@@ -833,9 +900,6 @@ export class TransactionService {
 
           if (paymentEvidenceMsg && paymentEvidenceMsg.message_id !== invoiceMessageId) {
             if (paymentPhoto || paymentDoc) {
-              const receiptCaption = effectiveNote
-                ? `🧾 Payment Receipt: ${effectiveNote}`
-                : '🧾 Payment Receipt';
               const copiedEvidence = await api.copyMessage(
                 chatId,
                 chatId,
@@ -843,6 +907,7 @@ export class TransactionService {
                 {
                   message_thread_id: config.confirmedTopicId,
                   caption: receiptCaption,
+                  reply_to_message_id: confirmedMsgId,
                 }
               );
               additionalConfirmedMsgIds.push(copiedEvidence.message_id);
@@ -854,6 +919,7 @@ export class TransactionService {
                 paymentEvidenceMsg.message_id,
                 {
                   message_thread_id: config.confirmedTopicId,
+                  reply_to_message_id: confirmedMsgId,
                 }
               );
               additionalConfirmedMsgIds.push(copiedEvidence.message_id);
@@ -878,6 +944,51 @@ export class TransactionService {
         ? buildMessageLink(chatId, effectiveReceiptMsgId)
         : confirmationUrl;
 
+      // When confirmation and receipt are separate messages, edit confirmation header to link directly to receipt
+      if (effectiveReceiptMsgId && effectiveReceiptMsgId !== confirmedMsgId && !isSubsequentPayment) {
+        const linkedHeaderText = formatConfirmedHeader(
+          distributorName,
+          transaction.amount,
+          transaction.receivedAt,
+          paidAt,
+          transaction.id,
+          effectiveNote,
+          transaction.notes,
+          {
+            status: newStatus,
+            paymentAmount: payAmount,
+            cumulativePaid,
+            remainingBalance,
+            originalAmount,
+            additionsTotal,
+            bankDetails,
+            receiptUrl,
+          }
+        );
+        try {
+          if (!invoicePhoto && !invoiceDoc) {
+            const linkedCombined = formatConfirmedInvoiceContent(
+              linkedHeaderText,
+              originalInvoiceContent
+            );
+            await api.editMessageText(
+              chatId,
+              confirmedMsgId,
+              linkedCombined.length <= MAX_TEXT_LENGTH ? linkedCombined : linkedHeaderText
+            );
+          } else {
+            await api.editMessageCaption(chatId, confirmedMsgId, {
+              caption:
+                linkedHeaderText.length <= MAX_CAPTION_LENGTH
+                  ? linkedHeaderText
+                  : linkedHeaderText.slice(0, MAX_CAPTION_LENGTH),
+            });
+          }
+        } catch {
+          /* best effort link update */
+        }
+      }
+
       // ── Phase 2: Record Payment in DB ────────────────────
       if (typeof this.repo.recordPayment === 'function') {
         await this.repo.recordPayment(
@@ -889,11 +1000,15 @@ export class TransactionService {
           null,
           effectiveNote,
           effectiveReceiptMsgId,
-          receiptUrl
+          receiptUrl,
+          cumulativePaid,
+          remainingBalance
         );
       }
 
       let committed = false;
+      const primaryConfirmedMsgId = transaction.confirmationMessageId ?? confirmedMsgId;
+      const primaryConfirmationUrl = buildMessageLink(chatId, primaryConfirmedMsgId);
       try {
         if (typeof this.repo.updateTransactionPaymentStatus === 'function') {
           committed = await this.repo.updateTransactionPaymentStatus({
@@ -901,8 +1016,8 @@ export class TransactionService {
             status: newStatus,
             paidAt,
             paymentMessageId: paymentMsgId,
-            confirmationMessageId: confirmedMsgId,
-            confirmationUrl,
+            confirmationMessageId: primaryConfirmedMsgId,
+            confirmationUrl: primaryConfirmationUrl,
             historyMessageId: null,
             allowFromStatuses: ['PENDING', 'PARTIALLY_PAID'],
           });
@@ -911,8 +1026,8 @@ export class TransactionService {
             transaction.id,
             paidAt,
             paymentMsgId,
-            confirmedMsgId,
-            confirmationUrl,
+            primaryConfirmedMsgId,
+            primaryConfirmationUrl,
             0
           );
         }
