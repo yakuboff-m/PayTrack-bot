@@ -1,6 +1,6 @@
 import { getDatabase } from '../database/database';
 import { IDatabase, SqliteDatabaseAdapter } from '../database/adapter';
-import type { TransactionRow, PaymentRow } from '../types';
+import type { TransactionRow, PaymentRow, InvoiceAdditionRow } from '../types';
 
 export class TransactionRepository {
   private db: IDatabase;
@@ -103,16 +103,24 @@ export class TransactionRepository {
     let row = await this.db.first<TransactionRow>(
       `SELECT * FROM transactions
        WHERE (telegram_chat_id = ? OR telegram_chat_id = ?)
-         AND (original_message_id = ? OR metadata_message_id = ? OR confirmation_message_id = ? OR history_message_id = ?)`,
-      [rawChatId, altChatId, messageId, messageId, messageId, messageId]
+         AND (
+           original_message_id = ? OR metadata_message_id = ? OR confirmation_message_id = ? OR history_message_id = ?
+           OR id IN (SELECT transaction_id FROM invoice_additions WHERE message_id = ?)
+           OR id IN (SELECT transaction_id FROM payments WHERE payment_message_id = ? OR confirmed_message_id = ? OR history_message_id = ?)
+         )`,
+      [rawChatId, altChatId, messageId, messageId, messageId, messageId, messageId, messageId, messageId, messageId]
     );
 
     if (!row) {
       row = await this.db.first<TransactionRow>(
         `SELECT * FROM transactions
-         WHERE (original_message_id = ? OR metadata_message_id = ? OR confirmation_message_id = ? OR history_message_id = ?)
+         WHERE (
+           original_message_id = ? OR metadata_message_id = ? OR confirmation_message_id = ? OR history_message_id = ?
+           OR id IN (SELECT transaction_id FROM invoice_additions WHERE message_id = ?)
+           OR id IN (SELECT transaction_id FROM payments WHERE payment_message_id = ? OR confirmed_message_id = ? OR history_message_id = ?)
+         )
          ORDER BY id DESC`,
-        [messageId, messageId, messageId, messageId]
+        [messageId, messageId, messageId, messageId, messageId, messageId, messageId, messageId]
       );
     }
 
@@ -287,5 +295,52 @@ export class TransactionRepository {
       'UPDATE transactions SET metadata_message_id = ? WHERE id = ?',
       [metadataMessageId, id]
     );
+  }
+
+  async recordAddition(
+    transactionId: number,
+    amount: number,
+    addedAt: string,
+    messageId?: number | null,
+    mediaFileId?: string | null,
+    mediaType?: string | null,
+    note?: string | null
+  ): Promise<InvoiceAdditionRow> {
+    const result = await this.db.exec(
+      `INSERT INTO invoice_additions (transaction_id, amount, added_at, message_id, media_file_id, media_type, note)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [
+        transactionId,
+        amount,
+        addedAt,
+        messageId ?? null,
+        mediaFileId ?? null,
+        mediaType ?? null,
+        note ?? null,
+      ]
+    );
+    const row = await this.db.first<InvoiceAdditionRow>(
+      'SELECT * FROM invoice_additions WHERE id = ?',
+      [result.lastInsertRowid as number]
+    );
+    return row!;
+  }
+
+  async getAdditions(transactionId: number): Promise<InvoiceAdditionRow[]> {
+    return this.db.query<InvoiceAdditionRow>(
+      'SELECT * FROM invoice_additions WHERE transaction_id = ? ORDER BY id ASC',
+      [transactionId]
+    );
+  }
+
+  async findAdditionByMessageId(
+    transactionId: number,
+    messageId: number
+  ): Promise<InvoiceAdditionRow | undefined> {
+    const row = await this.db.first<InvoiceAdditionRow>(
+      'SELECT * FROM invoice_additions WHERE transaction_id = ? AND message_id = ?',
+      [transactionId, messageId]
+    );
+    return row ?? undefined;
   }
 }

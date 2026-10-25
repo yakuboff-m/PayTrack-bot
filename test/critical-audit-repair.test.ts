@@ -78,6 +78,23 @@ describe('Critical Transaction Workflow Audit & Repair Regression Suite', () => 
         };
       }
 
+      if (method === 'sendPhoto' || method === 'sendDocument') {
+        if (failSendThreadIds.has(payload.message_thread_id)) {
+          throw new Error(`Telegram API Error: Failed to send ${method} to thread ${payload.message_thread_id}`);
+        }
+        const id = 7500 + sentMessages.length;
+        sentMessages.push({ ...payload, message_id: id });
+        return {
+          ok: true,
+          result: {
+            message_id: id,
+            chat: { id: payload.chat_id },
+            date: Math.floor(Date.now() / 1000),
+            ...payload,
+          } as any,
+        };
+      }
+
       if (method === 'sendMediaGroup') {
         if (failSendThreadIds.has(payload.message_thread_id)) {
           throw new Error('Telegram API Error: sendMediaGroup failed');
@@ -495,8 +512,16 @@ describe('Critical Transaction Workflow Audit & Repair Regression Suite', () => 
   // 7. /add does not trigger receipt confirmation
   // ─────────────────────────────────────────────────────────────
   it('Scenario 7: /add updates invoice amount and does NOT trigger receipt confirmation', async () => {
-    const { bot, txRepo, txService, distService, distributor, sentMessages, editedTexts } =
-      await setupTestContext();
+    const {
+      bot,
+      txRepo,
+      txService,
+      distService,
+      distributor,
+      sentMessages,
+      editedTexts,
+      deletedMessageIds,
+    } = await setupTestContext();
 
     const tx = await txService.registerTransaction(
       String(testConfig.telegramGroupId),
@@ -540,10 +565,22 @@ describe('Critical Transaction Workflow Audit & Repair Regression Suite', () => 
     assert.equal(updatedTx.amount, 150000);
     assert.equal(updatedTx.status, 'PENDING');
 
-    // Pending invoice message edited to reflect new total
+    // Original pending invoice message edited with manual deletion notice
     const edited = editedTexts.find((e) => e.message_id === 107);
     assert.ok(edited);
-    assert.match(edited.text, /₩150,000/);
+    assert.match(edited.text, /Should be deleted manually/);
+    assert.match(edited.text, /🔄 UPDATED/);
+
+    // New updated invoice message created with grand total and breakdown
+    const newInvoice = sentMessages.find(
+      (m) => typeof m.caption === 'string' && m.caption.includes('Grand Total: ₩150,000')
+    );
+    assert.ok(newInvoice, 'New invoice message with grand total must be created');
+    assert.match(newInvoice.caption, /Initial: ₩100,000/);
+    assert.match(newInvoice.caption, /Added: ₩50,000/);
+
+    // Admin /add message was deleted
+    assert.ok(deletedMessageIds.includes(208), 'Admin /add message must be deleted');
   });
 
   // ─────────────────────────────────────────────────────────────

@@ -19,6 +19,7 @@ import {
   buildMetadataBlock,
   formatInvoiceId,
   formatCleanedPendingInvoiceCaption,
+  formatSupersededInvoiceCaption,
   parsePaidCommandPayload,
   nowISO,
 } from '../bot/helpers/format.helpers';
@@ -31,6 +32,37 @@ import type {
   InvoiceNote,
   TransactionStatus,
 } from '../types';
+
+export interface ExecuteAddAmountParams {
+  api: Api;
+  chatId: number | string;
+  pendingTopicId: number;
+  repliedMessage: Message;
+  addMessage: Message;
+  transaction: Transaction;
+  addedAmount: number;
+  optionalNote?: string;
+}
+
+export type ExecuteAddAmountResult =
+  | {
+      success: true;
+      transactionId: number;
+      newTotalAmount: number;
+      newInvoiceMessageId: number;
+      updatedInvoiceUrl: string;
+      supersededInvoiceMessageId: number;
+    }
+  | {
+      success: false;
+      error: string;
+      failedStep:
+        | 'resolve_and_validate'
+        | 'create_new_invoice'
+        | 'save_transaction'
+        | 'edit_original_invoice'
+        | 'delete_add_message';
+    };
 
 /**
  * In-memory lock set to prevent duplicate /confirmed processing within the same isolate.
@@ -1085,4 +1117,356 @@ export class TransactionService {
       processingLocks.delete(transaction.id);
     }
   }
+
+  /**
+   * Executes the /add amount workflow when an admin replies to an invoice message
+   * with new media and /add AMOUNT.
+   *
+   * Ordered and failure-safe:
+   * 1. Resolves and validates amount & status.
+   * 2. Preserves original invoice media and receivedAt timestamp.
+   * 3. Creates a new updated invoice record/message immediately (combining media where Telegram permits).
+   * 4. Updates transaction amount, appends addition record, and preserves existing payment ledger.
+   * 5. Edits original invoice message: removes keyboard, sets superseded caption with link and warning.
+   * 6. Deletes admin's /add message after all operations succeed.
+   * 7. Preserves source media and returns exact failed step if any error occurs.
+   */
+  async executeAddAmount(params: ExecuteAddAmountParams): Promise<ExecuteAddAmountResult> {
+    const {
+      api,
+      chatId,
+      pendingTopicId,
+      repliedMessage,
+      addMessage,
+      transaction,
+      addedAmount,
+      optionalNote,
+    } = params;
+
+    // 1. Resolve & validate
+    if (transaction.status === 'PAID') {
+      return {
+        success: false,
+        error: 'This transaction has already been paid in full.',
+        failedStep: 'resolve_and_validate',
+      };
+    }
+
+    if (addedAmount <= 0) {
+      return {
+        success: false,
+        error: 'Invalid added amount.',
+        failedStep: 'resolve_and_validate',
+      };
+    }
+
+    // Idempotency: avoid duplicate additions if Telegram retries the update
+    const existingAddition = await this.repo.findAdditionByMessageId(
+      transaction.id,
+      addMessage.message_id
+    );
+    if (existingAddition) {
+      const activeMsgId = transaction.metadataMessageId ?? addMessage.message_id;
+      return {
+        success: true,
+        transactionId: transaction.id,
+        newTotalAmount: transaction.amount ?? 0,
+        newInvoiceMessageId: activeMsgId,
+        updatedInvoiceUrl: buildMessageLink(chatId, activeMsgId),
+        supersededInvoiceMessageId: transaction.originalMessageId,
+      };
+    }
+
+    // Isolate lock
+    if (processingLocks.has(transaction.id)) {
+      return {
+        success: false,
+        error: 'This transaction is already being updated. Please wait.',
+        failedStep: 'resolve_and_validate',
+      };
+    }
+    processingLocks.add(transaction.id);
+
+    try {
+      // 2. Fetch history and calculate totals
+      const previousAdditions = await this.repo.getAdditions(transaction.id);
+      const totalPreviousAdditions = previousAdditions.reduce((sum, a) => sum + a.amount, 0);
+      const initialAmount = (transaction.amount ?? 0) - totalPreviousAdditions;
+      const newTotalAmount = (transaction.amount ?? 0) + addedAmount;
+      const now = nowISO();
+
+      const additionsList = [
+        ...previousAdditions.map((a) => ({ amount: a.amount, addedAt: a.added_at })),
+        { amount: addedAmount, addedAt: now },
+      ];
+
+      let paymentProgress: { cumulativePaid: number; remainingBalance: number } | undefined;
+      if (transaction.status === 'PARTIALLY_PAID') {
+        const cumulativePaid = await this.repo.getTotalPaid(transaction.id);
+        const remainingBalance = Math.max(0, newTotalAmount - cumulativePaid);
+        paymentProgress = { cumulativePaid, remainingBalance };
+      }
+
+      // 3. Extract media from replied and add messages
+      const repliedPhoto =
+        repliedMessage.photo && repliedMessage.photo.length > 0
+          ? repliedMessage.photo[repliedMessage.photo.length - 1].file_id
+          : null;
+      const repliedDoc = repliedMessage.document?.file_id ?? null;
+
+      const addPhoto =
+        addMessage.photo && addMessage.photo.length > 0
+          ? addMessage.photo[addMessage.photo.length - 1].file_id
+          : null;
+      const addDoc = addMessage.document?.file_id ?? null;
+
+      const prevPhotos = previousAdditions
+        .filter((a) => a.media_type === 'photo' && a.media_file_id)
+        .map((a) => a.media_file_id as string);
+      const prevDocs = previousAdditions
+        .filter((a) => a.media_type === 'document' && a.media_file_id)
+        .map((a) => a.media_file_id as string);
+
+      // Compose caption
+      const repliedText = repliedMessage.text ?? repliedMessage.caption ?? '';
+      const { original } = splitOriginalAndMetadata(repliedText);
+      const metadataBlock = buildMetadataBlock(
+        transaction.distributorSnapshot,
+        newTotalAmount,
+        transaction.receivedAt,
+        transaction.id,
+        transaction.notes,
+        paymentProgress,
+        {
+          initialAmount,
+          initialTimestamp: transaction.receivedAt,
+          additions: additionsList,
+        }
+      );
+
+      const combinedCaption = original ? composeMessageText(original, metadataBlock) : metadataBlock;
+      const safeCaption =
+        combinedCaption.length <= MAX_CAPTION_LENGTH ? combinedCaption : metadataBlock;
+
+      // Group photos or documents if Telegram API permits
+      const allPhotos = Array.from(
+        new Set([repliedPhoto, ...prevPhotos, addPhoto].filter((p): p is string => Boolean(p)))
+      );
+      const allDocs = Array.from(
+        new Set([repliedDoc, ...prevDocs, addDoc].filter((d): d is string => Boolean(d)))
+      );
+
+      const canGroupPhotos =
+        !repliedDoc && !addDoc && prevDocs.length === 0 && allPhotos.length >= 2;
+      const canGroupDocs =
+        !repliedPhoto && !addPhoto && prevPhotos.length === 0 && allDocs.length >= 2;
+
+      let newInvoiceMsg: Message;
+      let keyboardMsg: Message | undefined;
+
+      // 4. Create new updated invoice record/message immediately
+      try {
+        if (canGroupPhotos) {
+          const mediaGroup = allPhotos.slice(0, 10).map((fileId, idx) => ({
+            type: 'photo' as const,
+            media: fileId,
+            caption: idx === 0 ? safeCaption : undefined,
+          }));
+          const sent = await api.sendMediaGroup(chatId, mediaGroup, {
+            message_thread_id: pendingTopicId,
+          });
+          newInvoiceMsg = sent[0];
+          if (transaction.distributorSnapshot?.accountNumber) {
+            try {
+              keyboardMsg = await api.sendMessage(
+                chatId,
+                `💳 ${transaction.distributorSnapshot.name} • ${transaction.distributorSnapshot.bankName} ${transaction.distributorSnapshot.accountNumber}`,
+                {
+                  message_thread_id: pendingTopicId,
+                  reply_to_message_id: newInvoiceMsg.message_id,
+                  reply_markup: copyAccountKeyboard(transaction.distributorSnapshot.accountNumber),
+                }
+              );
+            } catch (kErr) {
+              console.warn('Failed to send follow-up copy account keyboard for media group:', kErr);
+            }
+          }
+        } else if (canGroupDocs) {
+          const mediaGroup = allDocs.slice(0, 10).map((fileId, idx) => ({
+            type: 'document' as const,
+            media: fileId,
+            caption: idx === 0 ? safeCaption : undefined,
+          }));
+          const sent = await api.sendMediaGroup(chatId, mediaGroup, {
+            message_thread_id: pendingTopicId,
+          });
+          newInvoiceMsg = sent[0];
+          if (transaction.distributorSnapshot?.accountNumber) {
+            try {
+              keyboardMsg = await api.sendMessage(
+                chatId,
+                `💳 ${transaction.distributorSnapshot.name} • ${transaction.distributorSnapshot.bankName} ${transaction.distributorSnapshot.accountNumber}`,
+                {
+                  message_thread_id: pendingTopicId,
+                  reply_to_message_id: newInvoiceMsg.message_id,
+                  reply_markup: copyAccountKeyboard(transaction.distributorSnapshot.accountNumber),
+                }
+              );
+            } catch (kErr) {
+              console.warn('Failed to send follow-up copy account keyboard for media group:', kErr);
+            }
+          }
+        } else {
+          // Single media or mixed media (Telegram doesn't allow photo+doc in same mediaGroup)
+          const mediaFileId = addPhoto ?? addDoc ?? repliedPhoto ?? repliedDoc;
+          const isPhoto = Boolean(addPhoto || (!addDoc && repliedPhoto));
+          const isDoc = Boolean(addDoc || (!addPhoto && repliedDoc));
+          const keyboard = transaction.distributorSnapshot?.accountNumber
+            ? copyAccountKeyboard(transaction.distributorSnapshot.accountNumber)
+            : undefined;
+
+          if (isPhoto && mediaFileId) {
+            newInvoiceMsg = await api.sendPhoto(chatId, mediaFileId, {
+              caption: safeCaption,
+              message_thread_id: pendingTopicId,
+              reply_markup: keyboard,
+            });
+          } else if (isDoc && mediaFileId) {
+            newInvoiceMsg = await api.sendDocument(chatId, mediaFileId, {
+              caption: safeCaption,
+              message_thread_id: pendingTopicId,
+              reply_markup: keyboard,
+            });
+          } else {
+            newInvoiceMsg = await api.sendMessage(chatId, safeCaption, {
+              message_thread_id: pendingTopicId,
+              reply_markup: keyboard,
+            });
+          }
+        }
+      } catch (sendErr) {
+        return {
+          success: false,
+          error: `Failed to create updated invoice message: ${(sendErr as Error).message}`,
+          failedStep: 'create_new_invoice',
+        };
+      }
+
+      // 5. Save updated transaction and addition record in database
+      try {
+        await this.setAmount(transaction.id, newTotalAmount);
+        await this.repo.recordAddition(
+          transaction.id,
+          addedAmount,
+          now,
+          addMessage.message_id,
+          addPhoto ?? addDoc ?? null,
+          addPhoto ? 'photo' : addDoc ? 'document' : null,
+          optionalNote ?? null
+        );
+        await this.repo.updateMetadataMessageId(transaction.id, newInvoiceMsg.message_id);
+
+        if (optionalNote) {
+          const currentNotes = transaction.notes ?? [];
+          currentNotes.push({
+            text: optionalNote,
+            createdAt: now,
+          });
+          await this.repo.updateNotes(transaction.id, JSON.stringify(currentNotes));
+        }
+      } catch (dbErr) {
+        // Rollback created invoice message on DB failure
+        try {
+          await api.deleteMessage(chatId, newInvoiceMsg.message_id);
+          if (keyboardMsg) {
+            await api.deleteMessage(chatId, keyboardMsg.message_id);
+          }
+        } catch {
+          /* best effort */
+        }
+        return {
+          success: false,
+          error: `Failed to save updated transaction record: ${(dbErr as Error).message}`,
+          failedStep: 'save_transaction',
+        };
+      }
+
+      // 6. Edit original invoice message in Pending topic
+      const targetMessageIds = Array.from(
+        new Set(
+          [transaction.metadataMessageId, repliedMessage.message_id].filter(
+            (id): id is number => Boolean(id) && id !== newInvoiceMsg.message_id
+          )
+        )
+      );
+
+      const updatedInvoiceUrl = buildMessageLink(chatId, newInvoiceMsg.message_id);
+      const supersededCaption = formatSupersededInvoiceCaption(
+        transaction.id,
+        updatedInvoiceUrl
+      );
+
+      try {
+        for (const targetId of targetMessageIds) {
+          const isRepliedMedia = Boolean(repliedMessage.photo || repliedMessage.document);
+          if (isRepliedMedia) {
+            try {
+              await api.editMessageCaption(chatId, targetId, {
+                caption: supersededCaption,
+                reply_markup: { inline_keyboard: [] },
+              });
+            } catch (capErr: unknown) {
+              if (isNoTextMessageError(capErr)) {
+                await api.editMessageText(chatId, targetId, supersededCaption, {
+                  reply_markup: { inline_keyboard: [] },
+                });
+              } else {
+                throw capErr;
+              }
+            }
+          } else {
+            try {
+              await api.editMessageText(chatId, targetId, supersededCaption, {
+                reply_markup: { inline_keyboard: [] },
+              });
+            } catch (txtErr: unknown) {
+              if (isNoTextMessageError(txtErr)) {
+                await api.editMessageCaption(chatId, targetId, {
+                  caption: supersededCaption,
+                  reply_markup: { inline_keyboard: [] },
+                });
+              } else {
+                throw txtErr;
+              }
+            }
+          }
+        }
+      } catch (editErr) {
+        return {
+          success: false,
+          error: `Failed to edit original invoice message: ${(editErr as Error).message}`,
+          failedStep: 'edit_original_invoice',
+        };
+      }
+
+      // 7. Delete admin's /add message containing the additional invoice media
+      try {
+        await api.deleteMessage(chatId, addMessage.message_id);
+      } catch (delErr) {
+        console.warn(`Failed to delete admin /add message: ${(delErr as Error).message}`);
+      }
+
+      return {
+        success: true,
+        transactionId: transaction.id,
+        newTotalAmount,
+        newInvoiceMessageId: newInvoiceMsg.message_id,
+        updatedInvoiceUrl,
+        supersededInvoiceMessageId: targetMessageIds[0] ?? repliedMessage.message_id,
+      };
+    } finally {
+      processingLocks.delete(transaction.id);
+    }
+  }
 }
+

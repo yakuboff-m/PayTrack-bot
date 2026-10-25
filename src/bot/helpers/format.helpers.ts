@@ -269,6 +269,12 @@ export function parsePaidCommandPayload(text: string): PaidCommandPayload {
   };
 }
 
+export interface AdditionsBreakdown {
+  initialAmount: number;
+  initialTimestamp?: string;
+  additions: Array<{ amount: number; addedAt: string }>;
+}
+
 /**
  * Builds the metadata block for the bot's transaction message caption.
  * Every line has an emoji prefix for visual richness, with unique invoice ID at the top.
@@ -282,7 +288,8 @@ export function buildMetadataBlock(
   paymentProgress?: {
     cumulativePaid: number;
     remainingBalance: number;
-  }
+  },
+  additionsBreakdown?: AdditionsBreakdown
 ): string {
   const lines: string[] = [METADATA_SEPARATOR];
 
@@ -297,7 +304,16 @@ export function buildMetadataBlock(
     lines.push(`👤 ${distributor.accountHolder}`);
   }
 
-  if (amount !== null) {
+  if (additionsBreakdown && additionsBreakdown.additions.length > 0) {
+    const initTime = additionsBreakdown.initialTimestamp
+      ? ` (${formatTimestamp(additionsBreakdown.initialTimestamp)})`
+      : '';
+    lines.push(`📥 Initial: ${formatAmount(additionsBreakdown.initialAmount)}${initTime}`);
+    for (const add of additionsBreakdown.additions) {
+      lines.push(`➕ Added: ${formatAmount(add.amount)} (${formatTimestamp(add.addedAt)})`);
+    }
+    lines.push(`💰 Grand Total: ${formatAmount(amount ?? additionsBreakdown.initialAmount)}`);
+  } else if (amount !== null) {
     lines.push(`💰 ${formatAmount(amount)}`);
   }
 
@@ -306,7 +322,7 @@ export function buildMetadataBlock(
     lines.push(`⚖️ Balance Due: ${formatAmount(paymentProgress.remainingBalance)}`);
   }
 
-  if (receivedAt) {
+  if (receivedAt && (!additionsBreakdown || additionsBreakdown.additions.length === 0)) {
     lines.push(`📅 ${formatTimestamp(receivedAt)}`);
   }
 
@@ -316,6 +332,25 @@ export function buildMetadataBlock(
   }
 
   lines.push(METADATA_SEPARATOR);
+  return lines.join('\n');
+}
+
+/**
+ * Formats the superseded caption for the original invoice message in the Pending topic
+ * after /add creates a new updated invoice message.
+ * Removes all keyboards and shows only invoice ID, link/status, and the warning text:
+ * ⚠️ Should be deleted manually!
+ */
+export function formatSupersededInvoiceCaption(
+  invoiceId: number,
+  updatedInvoiceUrl: string
+): string {
+  const lines = [
+    `🆔 ${formatInvoiceId(invoiceId)} • 🔄 UPDATED`,
+    `🔗 Updated Invoice: ${updatedInvoiceUrl}`,
+    '',
+    '⚠️ Should be deleted manually!',
+  ];
   return lines.join('\n');
 }
 

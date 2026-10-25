@@ -197,57 +197,29 @@ export function registerAmountHandler(
           }
         }
 
-        if (transaction.status !== 'PENDING') {
-          await ctx.reply('❌ This transaction has already been confirmed.', {
+        if (transaction.status === 'PAID') {
+          await ctx.reply('❌ This transaction has already been paid in full.', {
             message_thread_id: threadId,
           });
           return;
         }
 
-        const currentAmount = transaction.amount ?? 0;
-        const newTotalAmount = currentAmount + addedAmount;
-        await transactionService.setAmount(transaction.id, newTotalAmount);
+        const result = await transactionService.executeAddAmount({
+          api: ctx.api,
+          chatId: ctx.chat.id,
+          pendingTopicId: config.pendingTopicId,
+          repliedMessage: repliedMsg,
+          addMessage: msg,
+          transaction,
+          addedAmount,
+          optionalNote,
+        });
 
-        const updated = (await transactionService.findByAnyMessageId(chatId, repliedMsg.message_id))!;
-
-        const keyboard = updated.distributorSnapshot
-          ? copyAccountKeyboard(updated.distributorSnapshot.accountNumber)
-          : undefined;
-
-        const result = await transactionService.updateTransactionDisplay(
-          ctx.api,
-          ctx.chat.id,
-          config.pendingTopicId,
-          repliedMsg,
-          updated,
-          updated.distributorSnapshot,
-          updated.amount,
-          keyboard
-        );
-
-        if ('error' in result) {
+        if (!result.success) {
           await ctx.reply(`❌ ${result.error}`, { message_thread_id: threadId });
           return;
         }
 
-        if (msg.photo || msg.document) {
-          // If media invoice was uploaded with /add, preserve the media and send a clear confirmation
-          try {
-            await ctx.reply(
-              `✅ Added ${formatAmount(addedAmount)} to ${formatInvoiceId(transaction.id)} (New total: ${formatAmount(newTotalAmount)}).`,
-              { message_thread_id: threadId }
-            );
-          } catch {
-            /* ignore */
-          }
-        } else {
-          // Pure text command: delete to keep Pending clean
-          try {
-            await ctx.deleteMessage();
-          } catch {
-            /* ignore */
-          }
-        }
         return;
       }
     });

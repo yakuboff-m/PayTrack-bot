@@ -64,6 +64,30 @@ export interface PaymentRow {
   created_at: string;
 }
 
+export interface InvoiceAddition {
+  id: number;
+  transactionId: number;
+  amount: number;
+  addedAt: string;
+  messageId: number | null;
+  mediaFileId?: string | null;
+  mediaType?: string | null;
+  note: string | null;
+  createdAt: string;
+}
+
+export interface InvoiceAdditionRow {
+  id: number;
+  transaction_id: number;
+  amount: number;
+  added_at: string;
+  message_id: number | null;
+  media_file_id?: string | null;
+  media_type?: string | null;
+  note: string | null;
+  created_at: string;
+}
+
 export interface InvoiceNote {
   text: string;
   createdAt: string;
