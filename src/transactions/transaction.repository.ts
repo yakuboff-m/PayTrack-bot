@@ -169,7 +169,7 @@ export class TransactionRepository {
     paymentMessageId: number,
     confirmationMessageId: number,
     confirmationUrl: string,
-    historyMessageId: number
+    historyMessageId?: number | null
   ): Promise<boolean> {
     const result = await this.db.exec(
       `UPDATE transactions
@@ -185,7 +185,7 @@ export class TransactionRepository {
         paymentMessageId,
         confirmationMessageId,
         confirmationUrl,
-        historyMessageId,
+        historyMessageId ?? null,
         id,
       ]
     );
