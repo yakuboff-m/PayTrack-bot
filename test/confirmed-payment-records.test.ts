@@ -508,7 +508,7 @@ describe('Confirmed Topic Payment Records & Audit Trail Integration Tests', () =
         photo: [{ file_id: 'receipt_photo_5003', width: 800, height: 600 }],
         caption: '/paid 120000',
         reply_to_message: {
-          message_id: txAfterAdd?.metadataMessageId ?? 5001,
+          message_id: txAfterAdd?.metadata_message_id ?? 5001,
           chat: { id: testConfig.telegramGroupId },
           message_thread_id: testConfig.pendingTopicId,
           photo: [{ file_id: 'invoice_photo_5001', width: 800, height: 600 }],
@@ -611,7 +611,7 @@ describe('Confirmed Topic Payment Records & Audit Trail Integration Tests', () =
     // Verify transaction remains PENDING in database
     const tx = await txRepo.findById(1);
     assert.equal(tx?.status, 'PENDING');
-    assert.equal(Boolean(tx?.paidAt), false);
+    assert.equal(Boolean(tx?.paid_at), false);
 
     // Verify ledger has zero payments
     const payments = await txRepo.getPayments(1);

@@ -86,10 +86,10 @@ describe('Migration Verification Test Suite', () => {
       WEBHOOK_SECRET: 'expected-secret-token',
     };
 
-    const mockCtx: ExecutionContext = {
+    const mockCtx = {
       waitUntil: () => {},
       passThroughOnException: () => {},
-    };
+    } as unknown as ExecutionContext;
 
     it('rejects POST with 500 when WEBHOOK_SECRET is missing from environment', async () => {
       const envWithoutSecret = { ...mockEnv, WEBHOOK_SECRET: '' };
@@ -171,7 +171,12 @@ describe('Migration Verification Test Suite', () => {
         pendingTopicId: 1,
         originalMessageId: 1001,
         distributorId: 1,
-        distributorSnapshot: { name: 'Supplier' },
+        distributorSnapshot: {
+          name: 'Supplier',
+          bankName: 'Shinhan Bank',
+          accountNumber: '110-123-456789',
+          accountHolder: 'Kim',
+        },
         amount: 50000,
         currency: 'KRW',
         status: 'PENDING' as const,
@@ -182,6 +187,7 @@ describe('Migration Verification Test Suite', () => {
         confirmationUrl: null,
         historyMessageId: null,
         metadataMessageId: null,
+        initialAmount: null,
         notes: [],
         createdAt: new Date().toISOString(),
       };
@@ -240,7 +246,12 @@ describe('Migration Verification Test Suite', () => {
         pendingTopicId: 1,
         originalMessageId: 1001,
         distributorId: 1,
-        distributorSnapshot: { name: 'Supplier' },
+        distributorSnapshot: {
+          name: 'Supplier',
+          bankName: 'Shinhan Bank',
+          accountNumber: '110-123-456789',
+          accountHolder: 'Kim',
+        },
         amount: 50000,
         currency: 'KRW',
         status: 'PENDING' as const,
@@ -251,6 +262,7 @@ describe('Migration Verification Test Suite', () => {
         confirmationUrl: null,
         historyMessageId: null,
         metadataMessageId: null,
+        initialAmount: null,
         notes: [],
         createdAt: new Date().toISOString(),
       };
