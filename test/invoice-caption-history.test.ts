@@ -183,10 +183,10 @@ describe('Invoice Caption, Amount Breakdown, and Append-Only Action History', ()
 
     // Section A: Header
     assert.match(caption, /🧾 INVOICE • #INV0001/);
+    assert.match(caption, /🏦 Bank: Shinhan Bank/);
+    assert.match(caption, /🔢 Account: 110-123-456789/);
+    assert.match(caption, /👤 Holder: Kim Chul-soo/);
     assert.match(caption, /🏢 Meat Wholesaler Co/);
-    assert.doesNotMatch(caption, /110-123-456789/, 'Bank account number must not appear in caption');
-    assert.doesNotMatch(caption, /Shinhan Bank/, 'Bank name must not appear in caption');
-    assert.doesNotMatch(caption, /Meat Wholesaler Ltd/, 'Account holder must not appear in caption');
 
     // Section B: Action History
     assert.match(caption, /📜 ACTION HISTORY/);

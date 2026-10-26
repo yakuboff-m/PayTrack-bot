@@ -230,7 +230,9 @@ export function registerTransactionHandler(
           text: meatInvoice.formattedDisplay,
         } as Message;
 
-        const kb = copyAccountKeyboard(distributor.accountNumber);
+        const kb = distributor.accountNumber?.trim()
+          ? copyAccountKeyboard(distributor.accountNumber.trim())
+          : undefined;
         const result = await transactionService.updateTransactionDisplay(
           ctx.api,
           ctx.chat.id,
@@ -313,7 +315,9 @@ export function registerTransactionHandler(
       const updated = (await transactionService.findByAnyMessageId(chatId, repliedMsg.message_id))!;
 
       // Build keyboard with copy button
-      const kb = copyAccountKeyboard(distributor.accountNumber);
+      const kb = distributor.accountNumber?.trim()
+        ? copyAccountKeyboard(distributor.accountNumber.trim())
+        : undefined;
 
       // Re-send or edit with new content
       let displayMsg: Message = repliedMsg;

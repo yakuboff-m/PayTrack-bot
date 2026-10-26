@@ -222,10 +222,10 @@ describe('Regression Repair Sequence Suite', () => {
 
     // Verify caption and inline keyboard directly on primary photo invoice message
     assert.match(registeredBotMsg.caption, /🧾 INVOICE • #INV0001/);
+    assert.match(registeredBotMsg.caption, /🏦 Bank: Hana Bank/);
+    assert.match(registeredBotMsg.caption, /🔢 Account: 012-345678-2341/);
+    assert.match(registeredBotMsg.caption, /👤 Holder: Koreta CoLtd/);
     assert.match(registeredBotMsg.caption, /🏢 Koreta/);
-    assert.doesNotMatch(registeredBotMsg.caption, /012-345678-2341/, 'Bank account number must NOT appear in primary caption');
-    assert.doesNotMatch(registeredBotMsg.caption, /Hana Bank/, 'Bank name must NOT appear in primary caption');
-    assert.doesNotMatch(registeredBotMsg.caption, /Koreta CoLtd/, 'Account holder must NOT appear in primary caption');
     assert.match(registeredBotMsg.caption, /📥 Original Registration:/);
     assert.match(registeredBotMsg.caption, /💵 Registered Amount:\n└─> 💰 ₩340,000/);
     assert.match(registeredBotMsg.caption, /💰 Invoice Total: ₩340,000/);
@@ -279,13 +279,26 @@ describe('Regression Repair Sequence Suite', () => {
 
     // Verify companion button message exists
     const buttonMsg = sentMessages.find(
-      (m) => m.reply_markup?.inline_keyboard?.[0]?.[0]?.text === 'Copy Account Number'
+      (m) => typeof m.text === 'string' && m.text.includes('Account details for')
     );
-    assert.ok(buttonMsg, 'Copy Account Number button must be present');
+    assert.ok(buttonMsg, 'Account details control message must be present');
+    assert.equal(
+      buttonMsg.reply_markup?.inline_keyboard?.[0]?.[0]?.text,
+      'Copy Account Number'
+    );
+    assert.match(buttonMsg.text, /Hana Bank/);
+    assert.match(buttonMsg.text, /012-345678-2341/);
+    assert.match(buttonMsg.text, /Koreta CoLtd/);
 
     // Verify caption format on the new media message
     const combinedCaption = primaryAlbumMsg.caption;
     assert.match(combinedCaption, /🧾 INVOICE • #INV0001/);
+    assert.doesNotMatch(combinedCaption, /🏦 Bank:/, 'Bank details must not be in album caption');
+    assert.doesNotMatch(combinedCaption, /🔢 Account:/, 'Account details must not be in album caption');
+    assert.doesNotMatch(combinedCaption, /👤 Holder:/, 'Holder details must not be in album caption');
+    assert.doesNotMatch(combinedCaption, /012-345678-2341/, 'Account number must not be in album caption');
+    assert.doesNotMatch(combinedCaption, /Hana Bank/, 'Bank name must not be in album caption');
+    assert.doesNotMatch(combinedCaption, /Koreta CoLtd/, 'Holder name must not be in album caption');
     assert.match(combinedCaption, /📥 Original Registration:/);
     assert.match(combinedCaption, /💵 Registered Amount:\n└─> 💰 ₩340,000/);
     assert.match(combinedCaption, /➕ Invoice Addition/);

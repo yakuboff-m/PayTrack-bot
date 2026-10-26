@@ -112,15 +112,19 @@ export function parseInvoiceMetadataFromText(text: string): {
 
   let distributor: DistributorSnapshot | null = null;
   const nameMatch = text.match(/🏢\s*([^\r\n]+)/);
-  const bankMatch = text.match(/🏦\s*([^\r\n]+)/);
-  const accountMatch = text.match(/💳\s*([^\r\n]+)/);
-  const holderMatch = text.match(/👤\s*([^\r\n]+)/);
+  const bankMatch = text.match(/🏦\s*(?:Bank:\s*)?([^\r\n]+)/i);
+  const accountMatch = text.match(/(?:🔢|💳)\s*(?:Account:\s*)?([^\r\n]+)/i);
+  const holderMatch = text.match(/👤\s*(?:Holder:\s*)?([^\r\n]+)/i);
 
   if (nameMatch) {
+    let cleanAccount = accountMatch ? accountMatch[1].trim() : '';
+    if (cleanAccount.includes('Bank/account details are shown only')) {
+      cleanAccount = '';
+    }
     distributor = {
       name: nameMatch[1].trim(),
       bankName: bankMatch ? bankMatch[1].trim() : '',
-      accountNumber: accountMatch ? accountMatch[1].trim() : '',
+      accountNumber: cleanAccount,
       accountHolder: holderMatch ? holderMatch[1].trim() : '',
     };
   }
@@ -349,7 +353,7 @@ export function stripDuplicateTotalLines(text: string): string {
       if (/^(?:🧾|🥩|💰)?\s*(?:MEAT\s+)?INVOICE\b/i.test(trimmed)) return false;
       if (/^#?INV\d+\b/i.test(trimmed)) return false;
       if (/^━+$/.test(trimmed) || /^─+$/.test(trimmed) || /^-+$/.test(trimmed)) return false;
-      if (/^(?:🏢|🏦|💳|👤)/.test(trimmed)) return false;
+      if (/^(?:🏢|🏦|💳|👤|🔢)/.test(trimmed)) return false;
       if (/^(?:📜\s*)?ACTION HISTORY/i.test(trimmed)) return false;
       if (
         /^(?:📥\s*Original Registration|➕\s*Invoice Addition|➖\s*Partial payment|✅\s*Full payment|📝\s*Note:|💵\s*Registered Amount|💵\s*Amount Added|💵\s*Amount paid|🧾\s*Receipt URL)/i.test(
@@ -408,10 +412,29 @@ export function buildUnifiedInvoiceCaption(params: BuildUnifiedInvoiceCaptionPar
   headerLines.push(METADATA_SEPARATOR);
 
   if (params.distributor) {
-    headerLines.push(`🏢 ${params.distributor.name}`);
-    if (params.hasSeparateAccountControlMessage) {
-      headerLines.push('💳 Bank/account details are shown only in the separate account-control message.');
+    if (!params.hasSeparateAccountControlMessage) {
+      const bankLines: string[] = [];
+      const bankName = params.distributor.bankName?.trim();
+      const accountNumber = params.distributor.accountNumber?.trim();
+      const accountHolder = params.distributor.accountHolder?.trim();
+
+      if (bankName) {
+        bankLines.push(`🏦 Bank: ${bankName}`);
+      }
+      if (accountNumber) {
+        bankLines.push(`🔢 Account: ${accountNumber}`);
+      }
+      if (accountHolder) {
+        bankLines.push(`👤 Holder: ${accountHolder}`);
+      }
+      if (bankLines.length > 0) {
+        headerLines.push(...bankLines);
+        headerLines.push('');
+        headerLines.push(METADATA_SEPARATOR);
+      }
     }
+
+    headerLines.push(`🏢 ${params.distributor.name}`);
   }
 
   // ── Items breakdown (stripped of duplicate totals & header) ─
