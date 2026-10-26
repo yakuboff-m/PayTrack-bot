@@ -1303,66 +1303,20 @@ export class TransactionService {
         originalMediaType === 'document' ||
         Boolean(repliedMessage.photo || repliedMessage.document);
 
-      let editSucceeded = false;
-
-      // 4. Update the primary invoice message's caption and keyboard in place
-      if (isMedia) {
+      if (hasAddedMedia) {
+        // ── Case A: /add includes new invoice media ────────────────
+        // 1. Send a NEW, separate media message containing the newly added invoice media,
+        // with the complete invoice caption (design already specified) and account button attached.
         try {
-          await api.editMessageCaption(chatId, targetMessageId, {
-            caption: safeCaption,
-            reply_markup: keyboard,
-          });
-          editSucceeded = true;
-        } catch (capErr: unknown) {
-          if (isNoTextMessageError(capErr)) {
-            try {
-              await api.editMessageText(chatId, targetMessageId, safeCaption, {
-                reply_markup: keyboard,
-              });
-              editSucceeded = true;
-            } catch {
-              /* fall through to re-send fallback */
-            }
-          }
-        }
-      } else {
-        try {
-          await api.editMessageText(chatId, targetMessageId, safeCaption, {
-            reply_markup: keyboard,
-          });
-          editSucceeded = true;
-        } catch (txtErr: unknown) {
-          if (isNoTextMessageError(txtErr)) {
-            try {
-              await api.editMessageCaption(chatId, targetMessageId, {
-                caption: safeCaption,
-                reply_markup: keyboard,
-              });
-              editSucceeded = true;
-            } catch {
-              /* fall through to re-send fallback */
-            }
-          }
-        }
-      }
-
-      if (editSucceeded) {
-        newInvoiceMsg = {
-          ...repliedMessage,
-          message_id: targetMessageId,
-        } as Message;
-      } else {
-        // Fallback: Re-send preserving the ORIGINAL media with keyboard attached
-        try {
-          if (originalMediaType === 'photo' && originalMediaFileId) {
-            newInvoiceMsg = await api.sendPhoto(chatId, originalMediaFileId, {
+          if (addPhoto) {
+            newInvoiceMsg = await api.sendPhoto(chatId, addPhoto, {
               caption: safeCaption,
               message_thread_id: pendingTopicId,
               reply_markup: keyboard,
               parse_mode: 'HTML',
             });
-          } else if (originalMediaType === 'document' && originalMediaFileId) {
-            newInvoiceMsg = await api.sendDocument(chatId, originalMediaFileId, {
+          } else if (addDoc) {
+            newInvoiceMsg = await api.sendDocument(chatId, addDoc, {
               caption: safeCaption,
               message_thread_id: pendingTopicId,
               reply_markup: keyboard,
@@ -1375,61 +1329,167 @@ export class TransactionService {
               parse_mode: 'HTML',
             });
           }
+        } catch (sendErr) {
+          return {
+            success: false,
+            error: `Failed to create new invoice message: ${(sendErr as Error).message}`,
+            failedStep: 'create_new_invoice',
+          };
+        }
 
-          await this.repo.updateMetadataMessageId(transaction.id, newInvoiceMsg.message_id);
-          transaction.metadataMessageId = newInvoiceMsg.message_id;
-
-          // If fallback created a new message, update the old message with superseded notice
-          if (targetMessageId !== newInvoiceMsg.message_id) {
-            const updatedInvoiceUrl = buildMessageLink(chatId, newInvoiceMsg.message_id);
-            const supersededCaption = formatSupersededInvoiceCaption(transaction.id, updatedInvoiceUrl);
+        // 2. Update the original invoice's text/history message with a clear notice and direct link
+        const updatedInvoiceUrl = buildMessageLink(chatId, newInvoiceMsg.message_id);
+        const supersededNotice = formatSupersededInvoiceCaption(transaction.id, updatedInvoiceUrl);
+        try {
+          if (isMedia) {
+            await api.editMessageCaption(chatId, targetMessageId, {
+              caption: supersededNotice,
+              parse_mode: 'HTML',
+              reply_markup: { inline_keyboard: [] },
+            });
+          } else {
+            await api.editMessageText(chatId, targetMessageId, supersededNotice, {
+              parse_mode: 'HTML',
+              reply_markup: { inline_keyboard: [] },
+            });
+          }
+        } catch (err: unknown) {
+          if (isNoTextMessageError(err)) {
             try {
               if (isMedia) {
-                await api.editMessageCaption(chatId, targetMessageId, {
-                  caption: supersededCaption,
+                await api.editMessageText(chatId, targetMessageId, supersededNotice, {
                   parse_mode: 'HTML',
                   reply_markup: { inline_keyboard: [] },
                 });
               } else {
-                await api.editMessageText(chatId, targetMessageId, supersededCaption, {
+                await api.editMessageCaption(chatId, targetMessageId, {
+                  caption: supersededNotice,
                   parse_mode: 'HTML',
                   reply_markup: { inline_keyboard: [] },
                 });
               }
-            } catch (err: unknown) {
-              console.warn(`Failed to update superseded invoice message ${targetMessageId}:`, (err as Error).message);
+            } catch {
+              /* best effort */
             }
           }
-        } catch (sendErr) {
-          return {
-            success: false,
-            error: `Failed to update invoice message: ${(sendErr as Error).message}`,
-            failedStep: 'create_new_invoice',
-          };
+          console.warn(`Failed to update original invoice notice ${targetMessageId}:`, (err as Error).message);
         }
-      }
 
-      // If addition contained media, send as companion media linked to the primary invoice
-      if (hasAddedMedia) {
-        const addNotice = `📎 <b>Additional invoice media for ${formatInvoiceId(transaction.id)}</b> (+${formatAmount(addedAmount)})`;
-        try {
-          if (addPhoto) {
-            await api.sendPhoto(chatId, addPhoto, {
-              caption: addNotice,
-              message_thread_id: pendingTopicId,
-              reply_to_message_id: newInvoiceMsg.message_id,
-              parse_mode: 'HTML',
+        // 3. Persist new primary message ID in DB (so subsequent operations target this active invoice), preserving superseded message in history
+        await this.repo.updateMetadataAndHistoryMessageId(
+          transaction.id,
+          newInvoiceMsg.message_id,
+          targetMessageId !== newInvoiceMsg.message_id ? targetMessageId : undefined
+        );
+        transaction.metadataMessageId = newInvoiceMsg.message_id;
+        if (targetMessageId !== newInvoiceMsg.message_id && !transaction.historyMessageId) {
+          transaction.historyMessageId = targetMessageId;
+        }
+      } else {
+        // ── Case B: Amount-only addition (no new media) ────────────
+        // Edit existing message in place
+        let editSucceeded = false;
+        if (isMedia) {
+          try {
+            await api.editMessageCaption(chatId, targetMessageId, {
+              caption: safeCaption,
+              reply_markup: keyboard,
             });
-          } else if (addDoc) {
-            await api.sendDocument(chatId, addDoc, {
-              caption: addNotice,
-              message_thread_id: pendingTopicId,
-              reply_to_message_id: newInvoiceMsg.message_id,
-              parse_mode: 'HTML',
-            });
+            editSucceeded = true;
+          } catch (capErr: unknown) {
+            if (isNoTextMessageError(capErr)) {
+              try {
+                await api.editMessageText(chatId, targetMessageId, safeCaption, {
+                  reply_markup: keyboard,
+                });
+                editSucceeded = true;
+              } catch {
+                /* fall through to re-send fallback */
+              }
+            }
           }
-        } catch (mediaErr: unknown) {
-          console.warn(`Failed to send companion addition media for ${transaction.id}:`, (mediaErr as Error).message);
+        } else {
+          try {
+            await api.editMessageText(chatId, targetMessageId, safeCaption, {
+              reply_markup: keyboard,
+            });
+            editSucceeded = true;
+          } catch (txtErr: unknown) {
+            if (isNoTextMessageError(txtErr)) {
+              try {
+                await api.editMessageCaption(chatId, targetMessageId, {
+                  caption: safeCaption,
+                  reply_markup: keyboard,
+                });
+                editSucceeded = true;
+              } catch {
+                /* fall through to re-send fallback */
+              }
+            }
+          }
+        }
+
+        if (editSucceeded) {
+          newInvoiceMsg = {
+            ...repliedMessage,
+            message_id: targetMessageId,
+          } as Message;
+        } else {
+          // Fallback: Re-send preserving the ORIGINAL media with keyboard attached
+          try {
+            if (originalMediaType === 'photo' && originalMediaFileId) {
+              newInvoiceMsg = await api.sendPhoto(chatId, originalMediaFileId, {
+                caption: safeCaption,
+                message_thread_id: pendingTopicId,
+                reply_markup: keyboard,
+                parse_mode: 'HTML',
+              });
+            } else if (originalMediaType === 'document' && originalMediaFileId) {
+              newInvoiceMsg = await api.sendDocument(chatId, originalMediaFileId, {
+                caption: safeCaption,
+                message_thread_id: pendingTopicId,
+                reply_markup: keyboard,
+                parse_mode: 'HTML',
+              });
+            } else {
+              newInvoiceMsg = await api.sendMessage(chatId, safeCaption, {
+                message_thread_id: pendingTopicId,
+                reply_markup: keyboard,
+                parse_mode: 'HTML',
+              });
+            }
+
+            await this.repo.updateMetadataMessageId(transaction.id, newInvoiceMsg.message_id);
+            transaction.metadataMessageId = newInvoiceMsg.message_id;
+
+            // If fallback created a new message, update the old message with superseded notice
+            if (targetMessageId !== newInvoiceMsg.message_id) {
+              const updatedInvoiceUrl = buildMessageLink(chatId, newInvoiceMsg.message_id);
+              const supersededCaption = formatSupersededInvoiceCaption(transaction.id, updatedInvoiceUrl);
+              try {
+                if (isMedia) {
+                  await api.editMessageCaption(chatId, targetMessageId, {
+                    caption: supersededCaption,
+                    parse_mode: 'HTML',
+                    reply_markup: { inline_keyboard: [] },
+                  });
+                } else {
+                  await api.editMessageText(chatId, targetMessageId, supersededCaption, {
+                    parse_mode: 'HTML',
+                    reply_markup: { inline_keyboard: [] },
+                  });
+                }
+              } catch (err: unknown) {
+                console.warn(`Failed to update superseded invoice message ${targetMessageId}:`, (err as Error).message);
+              }
+            }
+          } catch (sendErr) {
+            return {
+              success: false,
+              error: `Failed to update invoice message: ${(sendErr as Error).message}`,
+              failedStep: 'create_new_invoice',
+            };
+          }
         }
       }
 

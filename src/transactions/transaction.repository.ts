@@ -320,6 +320,21 @@ export class TransactionRepository {
     );
   }
 
+  async updateMetadataAndHistoryMessageId(
+    id: number,
+    metadataMessageId: number,
+    historyMessageId?: number | null
+  ): Promise<void> {
+    if (historyMessageId) {
+      await this.db.exec(
+        'UPDATE transactions SET metadata_message_id = ?, history_message_id = COALESCE(history_message_id, ?) WHERE id = ?',
+        [metadataMessageId, historyMessageId, id]
+      );
+    } else {
+      await this.updateMetadataMessageId(id, metadataMessageId);
+    }
+  }
+
   async updateMedia(id: number, mediaFileId: string | null, mediaType: string | null): Promise<void> {
     await this.db.exec(
       'UPDATE transactions SET media_file_id = ?, media_type = ? WHERE id = ?',

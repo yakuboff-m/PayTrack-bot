@@ -638,13 +638,7 @@ export function formatSupersededInvoiceCaption(
   updatedInvoiceUrl: string
 ): string {
   const invStr = formatInvoiceId(invoiceId);
-  return [
-    `⚠️ ${invStr} UPDATED`,
-    '',
-    `🔗 Updated invoice: <a href="${updatedInvoiceUrl}">Open updated invoice</a>`,
-    '',
-    '🗑 This message should be deleted manually.',
-  ].join('\n');
+  return `⚠️ Invoice ${invStr} was updated with additional media: <a href="${updatedInvoiceUrl}">View updated invoice</a>. The original invoice media remains unchanged.`;
 }
 
 /**
