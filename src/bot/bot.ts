@@ -11,7 +11,9 @@ import { registerDistributorHandler } from './handlers/distributor.handler';
 import { registerAmountHandler } from './handlers/amount.handler';
 import { registerConfirmedHandler } from './handlers/confirmed.handler';
 import { registerNoteHandler } from './handlers/note.handler';
+import { registerEditHandler } from './handlers/edit.handler';
 import { registerTransactionHandler } from './handlers/transaction.handler';
+import { globalMessageTracker } from './helpers/message-tracker';
 import type { IDatabase } from '../database/adapter';
 import type { IConversationStore } from '../distributors/conversation.store';
 
@@ -61,6 +63,14 @@ export function createBot(options?: CreateBotOptions): {
     });
   }
 
+  // Track incoming messages for /edit and other reply-based workflows
+  bot.use(async (ctx, next) => {
+    if (ctx.message) {
+      globalMessageTracker.record(ctx.message);
+    }
+    await next();
+  });
+
   bot.catch((err) => {
     console.error('Bot error:', err.error);
     console.error('Update that caused the error:', JSON.stringify(err.ctx.update, null, 2));
@@ -74,6 +84,7 @@ export function createBot(options?: CreateBotOptions): {
   registerAmountHandler(bot, transactionService, distributorService, config);
   registerConfirmedHandler(bot, transactionService, config);
   registerNoteHandler(bot, transactionService, config);
+  registerEditHandler(bot, transactionRepo, config);
 
   // 2. Dynamic distributor alias commands + auto-registration last
   //    (these match broadly and use next() to pass through)
