@@ -32,7 +32,8 @@ export default {
     if (request.method === 'GET' && url.pathname === '/setup-commands') {
       try {
         const config = parseConfigFromEnv(env);
-        const { bot } = createBot({ config });
+        const db = new D1DatabaseAdapter(env.paytrack_bot_db);
+        const { bot } = createBot({ config, db });
         await setupBotCommands(bot.api);
         return new Response(
           JSON.stringify({
