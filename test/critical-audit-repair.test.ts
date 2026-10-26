@@ -569,17 +569,23 @@ describe('Critical Transaction Workflow Audit & Repair Regression Suite', () => 
     assert.equal(updatedTx.amount, 150000);
     assert.equal(updatedTx.status, 'PENDING');
 
-    // Old pending invoice message superseded with notice and link
+    // Original pending invoice message edited in place to reflect addition
     const edited = editedTexts.find((e) => e.message_id === 107);
-    assert.ok(edited, 'Pending invoice message must be superseded');
-    assert.match(edited.text, /⚠️ #INV0001 UPDATED/);
+    assert.ok(edited, 'Pending invoice message must be edited in place');
+    assert.match(edited.text, /Invoice Total: ₩150,000/);
+    assert.match(edited.text, /Amount Added:\n└─> 💰 ₩50,000/);
+    assert.match(edited.text, /Need to Pay: ₩150,000/);
 
-    // New photo message sent with updated total and addition details
-    const newPhotoMsg = sentMessages.find((m) => m.photo === 'extra_delivery_photo');
-    assert.ok(newPhotoMsg, 'New invoice photo message must be sent');
-    assert.match(newPhotoMsg.caption, /Invoice Total: ₩150,000/);
-    assert.match(newPhotoMsg.caption, /Amount Added:\n└─> 💰 ₩50,000/);
-    assert.match(newPhotoMsg.caption, /Need to Pay: ₩150,000/);
+    // Companion photo sent for the addition
+    const companionPhoto = sentMessages.find((m) => m.photo === 'extra_delivery_photo');
+    assert.ok(companionPhoto, 'Companion photo must be sent');
+    assert.equal(companionPhoto.reply_to_message_id, 107);
+
+    // Assert no separate account details message was sent
+    const accountDetailsMsgs = sentMessages.filter(
+      (m) => typeof m.text === 'string' && m.text.includes('Account details for')
+    );
+    assert.equal(accountDetailsMsgs.length, 0, 'Must NOT send separate account details message');
 
     // Admin /add message was deleted
     assert.ok(deletedMessageIds.includes(208), 'Admin /add message must be deleted');

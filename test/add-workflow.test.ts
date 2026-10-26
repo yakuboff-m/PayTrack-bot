@@ -192,14 +192,11 @@ describe('/add Workflow Regression Suite', () => {
       },
     } as any);
 
-    // Assert combined media group was sent containing BOTH original and added photos
-    assert.equal(ctx.sentMediaGroups.length, 1, 'Must send combined media group');
-    const group = ctx.sentMediaGroups[0];
-    assert.equal(group.media.length, 2, 'Combined media group must have 2 photos');
-    assert.equal(group.media[0].media, 'photo_initial_1', 'First photo is original media');
-    assert.equal(group.media[1].media, 'photo_add_1', 'Second photo is added media');
+    // Assert primary invoice caption was edited in place with full caption and keyboard
+    const edited = ctx.editedCaptions.find((e) => e.message_id === 501);
+    assert.ok(edited, 'Primary invoice message (501) must be edited in place');
 
-    const primaryCaption = group.media[0].caption;
+    const primaryCaption = edited.caption;
     assert.ok(primaryCaption);
     assert.match(primaryCaption, /🧾 INVOICE • #INV0001/);
     assert.match(primaryCaption, /🏢 Meat Supplier/);
@@ -216,18 +213,28 @@ describe('/add Workflow Regression Suite', () => {
     const headingMatches = primaryCaption.match(/🧾 INVOICE • #INV0001/g);
     assert.equal(headingMatches?.length, 1, 'Heading must appear exactly once');
 
-    // Assert old invoice message (501) was superseded: notice + link to new invoice (8000) + keyboard removed
-    const editedOld = ctx.editedCaptions.find((e) => e.message_id === 501);
-    assert.ok(editedOld, 'Old invoice message (501) must have superseded caption');
-    assert.match(editedOld.caption, /⚠️ #INV0001 UPDATED/);
-    assert.match(editedOld.caption, /🔗 Updated invoice: <a href="https:\/\/t\.me\/c\/\d+\/8000">Open updated invoice<\/a>/);
-    assert.match(editedOld.caption, /🗑 This message should be deleted manually\./);
-    assert.deepEqual(editedOld.reply_markup?.inline_keyboard, [], 'Keyboard must be removed from old message');
+    // Copy Account Number button is attached directly to the invoice message
+    assert.equal(
+      edited.reply_markup?.inline_keyboard?.[0]?.[0]?.text,
+      'Copy Account Number',
+      'Copy Account Number button must be attached directly to the invoice message'
+    );
+
+    // Assert NO separate account details message was sent
+    const separateAccountMsgs = ctx.sentMessages.filter(
+      (m) => typeof m.text === 'string' && m.text.includes('Account details for')
+    );
+    assert.equal(separateAccountMsgs.length, 0, 'Must NOT send separate account details message');
+
+    // Companion photo sent for the addition
+    const companionPhoto = ctx.sentMessages.find((m) => m.photo === 'photo_add_1');
+    assert.ok(companionPhoto, 'Companion photo must be sent');
+    assert.equal(companionPhoto.reply_to_message_id, 501);
 
     // Assert DB total updated and addition recorded separately
     const updatedTx = (await ctx.txRepo.findById(tx.id))!;
     assert.equal(updatedTx.amount, 470000);
-    assert.equal(updatedTx.metadata_message_id, 8000, 'Primary message ID must be updated to new combined invoice');
+    assert.equal(updatedTx.metadata_message_id, 501, 'Primary message ID remains 501');
     assert.equal(updatedTx.media_file_id, 'photo_initial_1', 'Original media identity permanently preserved');
     assert.equal(updatedTx.media_type, 'photo');
 
@@ -241,7 +248,7 @@ describe('/add Workflow Regression Suite', () => {
     assert.ok(ctx.deletedMessageIds.includes(601), 'Admin /add message must be deleted');
   });
 
-  it('2. Document invoice + document /add: creates combined document media group and supersedes old invoice', async () => {
+  it('2. Document invoice + document /add: updates caption and keyboard in place and sends companion document', async () => {
     const ctx = await setupTestContext();
 
     const tx = await ctx.txService.registerTransaction(
@@ -252,6 +259,8 @@ describe('/add Workflow Regression Suite', () => {
       'doc_initial_1',
       'document'
     );
+    const snapshot = ctx.distService.createSnapshot(ctx.distributor);
+    await ctx.txService.assignDistributor(tx.id, ctx.distributor.id, snapshot);
     await ctx.txService.setAmount(tx.id, 100000);
     await ctx.txRepo.updateMetadataMessageId(tx.id, 502);
 
@@ -274,19 +283,28 @@ describe('/add Workflow Regression Suite', () => {
       },
     } as any);
 
-    // Assert combined document group was sent
-    assert.equal(ctx.sentMediaGroups.length, 1);
-    const group = ctx.sentMediaGroups[0];
-    assert.equal(group.media.length, 2);
-    assert.equal(group.media[0].media, 'doc_initial_1');
-    assert.equal(group.media[1].media, 'doc_add_2');
-    assert.match(group.media[0].caption, /💰 Invoice Total: ₩150,000/);
+    // Assert document invoice was edited in place
+    const edited = ctx.editedCaptions.find((e) => e.message_id === 502);
+    assert.ok(edited, 'Document invoice must be edited in place');
+    assert.match(edited.caption, /💰 Invoice Total: ₩150,000/);
+    assert.match(edited.caption, /⚖️ Need to Pay: ₩150,000/);
 
-    // Old document invoice superseded
-    const editedOld = ctx.editedCaptions.find((e) => e.message_id === 502);
-    assert.ok(editedOld);
-    assert.match(editedOld.caption, /⚠️ #INV0001 UPDATED/);
-    assert.deepEqual(editedOld.reply_markup?.inline_keyboard, []);
+    // Assert keyboard with Copy Account Number attached
+    assert.equal(
+      edited.reply_markup?.inline_keyboard?.[0]?.[0]?.text,
+      'Copy Account Number'
+    );
+
+    // Assert NO separate account details message
+    const separateAccountMsgs = ctx.sentMessages.filter(
+      (m) => typeof m.text === 'string' && m.text.includes('Account details for')
+    );
+    assert.equal(separateAccountMsgs.length, 0, 'Must NOT send separate account details message');
+
+    // Companion document sent
+    const companionDoc = ctx.sentMessages.find((m) => m.document === 'doc_add_2');
+    assert.ok(companionDoc, 'Companion document must be sent');
+    assert.equal(companionDoc.reply_to_message_id, 502);
 
     const updatedTx = (await ctx.txRepo.findById(tx.id))!;
     assert.equal(updatedTx.media_file_id, 'doc_initial_1');
@@ -310,6 +328,8 @@ describe('/add Workflow Regression Suite', () => {
       'photo_init',
       'photo'
     );
+    const snapshot = ctx.distService.createSnapshot(ctx.distributor);
+    await ctx.txService.assignDistributor(tx.id, ctx.distributor.id, snapshot);
     await ctx.txService.setAmount(tx.id, 100000);
     await ctx.txRepo.updateMetadataMessageId(tx.id, 503);
 
@@ -333,21 +353,22 @@ describe('/add Workflow Regression Suite', () => {
       },
     } as any);
 
-    // Primary photo invoice sent with original photo and full caption
-    const newPhotos = ctx.sentMessages.filter((m) => m.photo);
-    assert.ok(newPhotos.length >= 1, 'Primary photo must be sent');
-    assert.match(newPhotos[0].caption, /💰 Invoice Total: ₩180,000/);
+    // Assert primary photo invoice was edited in place with full caption and keyboard
+    const edited = ctx.editedCaptions.find((e) => e.message_id === 503);
+    assert.ok(edited, 'Primary photo invoice (503) must be edited in place');
+    assert.match(edited.caption, /💰 Invoice Total: ₩180,000/);
 
     // Companion document message sent with addition document
     const newDocs = ctx.sentMessages.filter((m) => m.document);
     assert.ok(newDocs.length >= 1, 'Companion document must be sent');
     assert.equal(newDocs[0].document, 'doc_supplementary');
+    assert.equal(newDocs[0].reply_to_message_id, 503);
 
-    // Old photo message (503) superseded
-    const editedOld = ctx.editedCaptions.find((e) => e.message_id === 503);
-    assert.ok(editedOld);
-    assert.match(editedOld.caption, /⚠️ #INV0001 UPDATED/);
-    assert.deepEqual(editedOld.reply_markup?.inline_keyboard, []);
+    // Assert NO separate account details message was sent
+    const separateAccountMsgs = ctx.sentMessages.filter(
+      (m) => typeof m.text === 'string' && m.text.includes('Account details for')
+    );
+    assert.equal(separateAccountMsgs.length, 0, 'Must NOT send separate account details message');
 
     // Original media is preserved as photo
     const updatedTx = (await ctx.txRepo.findById(tx.id))!;
@@ -467,17 +488,29 @@ describe('/add Workflow Regression Suite', () => {
     const totalPaid = await ctx.txRepo.getTotalPaid(tx.id);
     assert.equal(totalPaid, 100000, 'Total paid must remain 100k');
 
-    // Assert new combined media group contains updated financial progress
-    assert.equal(ctx.sentMediaGroups.length, 1);
-    const caption = ctx.sentMediaGroups[0].media[0].caption;
-    assert.match(caption, /💰 Invoice Total: ₩350,000/);
-    assert.match(caption, /💵 Total Paid: ₩100,000/);
-    assert.match(caption, /⚖️ Need to Pay: ₩250,000/);
-
-    // Assert old message was superseded
+    // Assert primary invoice message was edited in place with updated financial progress
     const edited = ctx.editedCaptions.find((e) => e.message_id === 505);
-    assert.ok(edited);
-    assert.match(edited.caption, /⚠️ #INV0001 UPDATED/);
+    assert.ok(edited, 'Primary invoice message must be edited in place');
+    assert.match(edited.caption, /💰 Invoice Total: ₩350,000/);
+    assert.match(edited.caption, /💵 Total Paid: ₩100,000/);
+    assert.match(edited.caption, /⚖️ Need to Pay: ₩250,000/);
+
+    // Assert keyboard with Copy Account Number attached
+    assert.equal(
+      edited.reply_markup?.inline_keyboard?.[0]?.[0]?.text,
+      'Copy Account Number'
+    );
+
+    // Companion photo sent
+    const companionPhoto = ctx.sentMessages.find((m) => m.photo === 'photo_partial_add');
+    assert.ok(companionPhoto, 'Companion photo must be sent');
+    assert.equal(companionPhoto.reply_to_message_id, 505);
+
+    // Assert NO separate account details message was sent
+    const separateAccountMsgs = ctx.sentMessages.filter(
+      (m) => typeof m.text === 'string' && m.text.includes('Account details for')
+    );
+    assert.equal(separateAccountMsgs.length, 0, 'Must NOT send separate account details message');
   });
 
   it('6. Failure safety: Telegram failure preserves source media and reports exact failure step', async () => {
@@ -611,15 +644,12 @@ describe('/add Workflow Regression Suite', () => {
       },
     } as any);
 
-    // 1. Primary invoice message created as combined media group with both photos
-    assert.equal(ctx.sentMediaGroups.length, 1, 'Must send combined media group');
-    const group = ctx.sentMediaGroups[0];
-    assert.equal(group.media.length, 2);
-    assert.equal(group.media[0].media, 'photo_invoice_12345_inv0015');
-    assert.equal(group.media[1].media, 'photo_book_cover_inv0015');
+    // 1. Primary invoice message edited in place with full caption and keyboard
+    const edited = ctx.editedCaptions.find((e) => e.message_id === 901);
+    assert.ok(edited, 'Primary invoice message 901 must be edited in place');
 
     // 2. Caption includes invoice identity, distributor, action history, and financial summary
-    const primaryCaption = group.media[0].caption;
+    const primaryCaption = edited.caption;
     assert.match(primaryCaption, /🧾 INVOICE • #INV0001/);
     assert.match(primaryCaption, /🏢 Koreta/);
     assert.match(primaryCaption, /💳 Hana Bank 012-345678-2341/);
@@ -634,11 +664,23 @@ describe('/add Workflow Regression Suite', () => {
     assert.match(primaryCaption, /⚖️ Need to Pay: ₩650,000/);
     assert.match(primaryCaption, /📊 Status: ⏳ PENDING/);
 
-    // 3. Old message 901 superseded
-    const editedOld = ctx.editedCaptions.find((e) => e.message_id === 901);
-    assert.ok(editedOld, 'Old message 901 must be superseded');
-    assert.match(editedOld.caption, /⚠️ #INV0001 UPDATED/);
-    assert.deepEqual(editedOld.reply_markup?.inline_keyboard, []);
+    // 3. Inline keyboard with Copy Account Number attached directly to invoice
+    assert.equal(
+      edited.reply_markup?.inline_keyboard?.[0]?.[0]?.text,
+      'Copy Account Number',
+      'Copy Account Number button must be attached directly to the invoice message'
+    );
+
+    // 4. Assert NO separate account details message was sent
+    const separateAccountMsgs = ctx.sentMessages.filter(
+      (m) => typeof m.text === 'string' && m.text.includes('Account details for')
+    );
+    assert.equal(separateAccountMsgs.length, 0, 'Must NOT send separate account details message');
+
+    // 5. Companion photo sent for the addition
+    const companionPhoto = ctx.sentMessages.find((m) => m.photo === 'photo_book_cover_inv0015');
+    assert.ok(companionPhoto, 'Companion photo must be sent');
+    assert.equal(companionPhoto.reply_to_message_id, 901);
 
     // 4. Database records the invoice correctly
     const updatedTx = (await ctx.txRepo.findById(tx.id))!;
@@ -695,12 +737,9 @@ describe('/add Workflow Regression Suite', () => {
     assert.equal(updatedTx.media_file_id, 'orig_photo_450k', 'Original media file ID must remain intact');
     assert.equal(updatedTx.media_type, 'photo');
 
-    // 4. Assert newly created updated invoice includes both original and added invoice media
-    assert.equal(ctx.sentMediaGroups.length, 1, 'Must send combined media group');
-    const group = ctx.sentMediaGroups[0];
-    assert.equal(group.media.length, 2, 'Combined media group must have 2 media items');
-    assert.equal(group.media[0].media, 'orig_photo_450k', 'First item is original media');
-    assert.equal(group.media[1].media, 'second_photo_50k', 'Second item is added media');
+    // 4. Assert primary invoice was edited in place with full caption and keyboard
+    const edited = ctx.editedCaptions.find((e) => e.message_id === 701);
+    assert.ok(edited, 'Primary invoice message 701 must be edited in place');
 
     // 5. Assert updated total is ₩500,000 and action history preserves registration and addition
     assert.equal(updatedTx.amount, 500000, 'Updated total must be ₩500,000');
@@ -709,7 +748,7 @@ describe('/add Workflow Regression Suite', () => {
     assert.equal(additions[0].amount, 50000);
     assert.equal(additions[0].note, 'Delivery fee');
 
-    const primaryCaption = group.media[0].caption;
+    const primaryCaption = edited.caption;
     assert.ok(primaryCaption);
     assert.match(primaryCaption, /📥 Original Registration:/);
     assert.match(primaryCaption, /💵 Registered Amount:\n└─> 💰 ₩450,000/);
@@ -719,15 +758,25 @@ describe('/add Workflow Regression Suite', () => {
     assert.match(primaryCaption, /💰 Invoice Total: ₩500,000/);
     assert.match(primaryCaption, /⚖️ Need to Pay: ₩500,000/);
 
-    // 6. Assert old message becomes a superseded notice with working link to updated message and no account-copy button
-    const oldEdited = ctx.editedCaptions.find((e) => e.message_id === 701);
-    assert.ok(oldEdited, 'Old message 701 must be edited');
-    assert.match(oldEdited.caption, /⚠️ #INV0001 UPDATED/);
-    assert.match(oldEdited.caption, /🔗 Updated invoice: <a href="https:\/\/t\.me\/c\/\d+\/8000">Open updated invoice<\/a>/);
-    assert.match(oldEdited.caption, /🗑 This message should be deleted manually\./);
-    assert.deepEqual(oldEdited.reply_markup?.inline_keyboard, [], 'Keyboard must be removed from old message');
+    // 6. Assert Copy Account Number button is attached directly to the invoice message
+    assert.equal(
+      edited.reply_markup?.inline_keyboard?.[0]?.[0]?.text,
+      'Copy Account Number',
+      'Copy Account Number button must be attached directly to the invoice message'
+    );
 
-    // 7. Assert invoice heading occurs exactly once
+    // 7. Assert NO separate account details message was sent
+    const separateAccountMsgs = ctx.sentMessages.filter(
+      (m) => typeof m.text === 'string' && m.text.includes('Account details for')
+    );
+    assert.equal(separateAccountMsgs.length, 0, 'Must NOT send separate account details message');
+
+    // 8. Companion photo sent for the addition
+    const companionPhoto = ctx.sentMessages.find((m) => m.photo === 'second_photo_50k');
+    assert.ok(companionPhoto, 'Companion photo must be sent');
+    assert.equal(companionPhoto.reply_to_message_id, 701);
+
+    // 9. Assert invoice heading occurs exactly once
     const headingMatches = primaryCaption.match(/🧾 INVOICE • #INV0001/g);
     assert.equal(headingMatches?.length, 1, 'Invoice heading must appear strictly once in final caption');
   });
