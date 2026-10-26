@@ -6,6 +6,8 @@ import {
   distributorSelectionKeyboard,
   deleteConfirmKeyboard,
   editFieldKeyboard,
+  adminReplyKeyboard,
+  adminInlineMenuKeyboard,
 } from '../keyboards/keyboards';
 import type {
   ConversationState,
@@ -36,6 +38,32 @@ function escapeMarkdown(text: string): string {
   return text.replace(/([_*\[\]()~`>#+\-=|{}.!\\])/g, '\\$1');
 }
 
+async function showDistributorsList(
+  ctx: Context,
+  service: DistributorService,
+  customConfig?: Config
+): Promise<void> {
+  const distributors = await service.findAll();
+  const userIsAdmin = ctx.from ? isAdmin(ctx.from.id, customConfig) : false;
+
+  if (distributors.length === 0) {
+    await ctx.reply('📋 No distributors found.', {
+      reply_markup: distributorListKeyboard(userIsAdmin),
+    });
+    return;
+  }
+
+  const lines = ['🏢 *DISTRIBUTORS*\n'];
+  distributors.forEach((d, i) => {
+    lines.push(`${i + 1}\\. ${escapeMarkdown(d.name)} \\(\`/${d.alias}\`\\)`);
+  });
+
+  await ctx.reply(lines.join('\n'), {
+    parse_mode: 'MarkdownV2',
+    reply_markup: distributorListKeyboard(userIsAdmin),
+  });
+}
+
 export function registerDistributorHandler(
   bot: Composer<Context>,
   distributorService: DistributorService,
@@ -44,28 +72,31 @@ export function registerDistributorHandler(
 ): void {
   const store = conversationStore ?? new MemoryConversationStore();
 
+  // ─── /menu ─ Admin interactive menu ──────────────────────────
+
+  bot.command('menu', requireAdmin(customConfig), async (ctx) => {
+    await ctx.reply(
+      '🏢 *Distributor Management Menu*\n\nSelect an option below to manage distributors:',
+      {
+        parse_mode: 'MarkdownV2',
+        reply_markup: adminReplyKeyboard(),
+      }
+    );
+  });
+
+  // ─── /cancel ─ Cancel ongoing conversation / action ─────────
+
+  bot.command('cancel', async (ctx) => {
+    if (!ctx.from || !ctx.chat) return;
+    const key = makeConversationKey(ctx.chat.id, ctx.from.id);
+    await store.delete(key);
+    await ctx.reply('❌ Cancelled.');
+  });
+
   // ─── /distributors ─ List all distributors ──────────────────
 
   bot.command('distributors', async (ctx) => {
-    const distributors = await distributorService.findAll();
-    const userIsAdmin = ctx.from ? isAdmin(ctx.from.id, customConfig) : false;
-
-    if (distributors.length === 0) {
-      await ctx.reply('📋 No distributors found.', {
-        reply_markup: distributorListKeyboard(userIsAdmin),
-      });
-      return;
-    }
-
-    const lines = ['🏢 *DISTRIBUTORS*\n'];
-    distributors.forEach((d, i) => {
-      lines.push(`${i + 1}\\. ${escapeMarkdown(d.name)} \\(\`/${d.alias}\`\\)`);
-    });
-
-    await ctx.reply(lines.join('\n'), {
-      parse_mode: 'MarkdownV2',
-      reply_markup: distributorListKeyboard(userIsAdmin),
-    });
+    await showDistributorsList(ctx, distributorService, customConfig);
   });
 
   // ─── /add_distributor ─ Start add flow ──────────────────────
@@ -84,6 +115,11 @@ export function registerDistributorHandler(
   });
 
   // ─── Callback queries for distributor management ────────────
+
+  bot.callbackQuery('dist:list', requireAdmin(customConfig), async (ctx) => {
+    await ctx.answerCallbackQuery();
+    await showDistributorsList(ctx, distributorService, customConfig);
+  });
 
   bot.callbackQuery('dist:add', requireAdmin(customConfig), async (ctx) => {
     await ctx.answerCallbackQuery();
@@ -123,7 +159,7 @@ export function registerDistributorHandler(
     });
   });
 
-  bot.callbackQuery('dist:cancel', async (ctx) => {
+  bot.callbackQuery('dist:cancel', requireAdmin(customConfig), async (ctx) => {
     await ctx.answerCallbackQuery('Cancelled');
     const key = makeConversationKey(ctx.chat!.id, ctx.from.id);
     await store.delete(key);
@@ -215,23 +251,111 @@ export function registerDistributorHandler(
     }
   });
 
-  // ─── Conversation flow: handle text messages ────────────────
+  // ─── Conversation flow: handle text messages and reply buttons ──
 
   bot.on('message:text', async (ctx, next) => {
     if (!ctx.from || !ctx.chat) return next();
 
+    const text = ctx.message.text.trim();
+
+    // 0. Command /menu
+    if (text === '/menu' || text.startsWith('/menu@') || text.startsWith('/menu ')) {
+      if (!isAdmin(ctx.from.id, customConfig)) return;
+      await ctx.reply(
+        '🏢 *Distributor Management Menu*\n\nSelect an option below to manage distributors:',
+        {
+          parse_mode: 'MarkdownV2',
+          reply_markup: adminReplyKeyboard(),
+        }
+      );
+      return;
+    }
+
+    // 1. Reply keyboard button: 🏢 Distributors
+    if (text === '🏢 Distributors') {
+      if (!isAdmin(ctx.from.id, customConfig)) return next();
+      await showDistributorsList(ctx, distributorService, customConfig);
+      return;
+    }
+
+    // 2. Reply keyboard button: ➕ Add Distributor
+    if (text === '➕ Add Distributor') {
+      if (!isAdmin(ctx.from.id, customConfig)) return next();
+      const key = makeConversationKey(ctx.chat.id, ctx.from.id);
+      await store.set(key, {
+        step: 'name',
+        action: 'add',
+        data: {},
+        startedAt: Date.now(),
+      });
+      await ctx.reply('➕ *Add Distributor*\n\nEnter the distributor name:', {
+        parse_mode: 'MarkdownV2',
+      });
+      return;
+    }
+
+    // 3. Reply keyboard button: ✏️ Edit Distributor
+    if (text === '✏️ Edit Distributor') {
+      if (!isAdmin(ctx.from.id, customConfig)) return next();
+      const distributors = await distributorService.findAll();
+      if (distributors.length === 0) {
+        await ctx.reply('No distributors to edit.');
+        return;
+      }
+      await ctx.reply('✏️ Select a distributor to edit:', {
+        reply_markup: distributorSelectionKeyboard(distributors, 'dist:edit'),
+      });
+      return;
+    }
+
+    // 4. Reply keyboard button: 🗑️ Delete Distributor
+    if (text === '🗑️ Delete Distributor' || text === '🗑 Delete Distributor') {
+      if (!isAdmin(ctx.from.id, customConfig)) return next();
+      const distributors = await distributorService.findAll();
+      if (distributors.length === 0) {
+        await ctx.reply('No distributors to delete.');
+        return;
+      }
+      await ctx.reply('🗑 Select a distributor to delete:', {
+        reply_markup: distributorSelectionKeyboard(distributors, 'dist:delete'),
+      });
+      return;
+    }
+
+    // 5. Reply keyboard button / command: ❌ Cancel
+    if (text === '❌ Cancel' || text.toLowerCase() === 'cancel' || text === '/cancel') {
+      const key = makeConversationKey(ctx.chat.id, ctx.from.id);
+      const state = await store.get(key);
+      if (state) {
+        await store.delete(key);
+        await ctx.reply('❌ Cancelled.');
+        return;
+      }
+      if (isAdmin(ctx.from.id, customConfig)) {
+        await ctx.reply('❌ Action cancelled.');
+        return;
+      }
+      return next();
+    }
+
+    // Active conversation check
     const key = makeConversationKey(ctx.chat.id, ctx.from.id);
     const state = await store.get(key);
     if (!state) return next();
 
-    const text = ctx.message.text.trim();
+    // Expire conversations older than 5 minutes
+    if (Date.now() - state.startedAt > 300_000) {
+      await store.delete(key);
+      await ctx.reply('⚠️ Conversation expired. Please start again from the menu or /distributors.');
+      return;
+    }
 
     if (state.action === 'add') {
       await handleAddFlow(ctx, key, state, text, distributorService, store);
     } else if (state.action === 'edit') {
       await handleEditFlow(ctx, key, state, text, distributorService, store);
     }
-    // Don't call next() — we consumed this message as part of the conversation
+    // Don't call next() — message was consumed by the active conversation
   });
 }
 
@@ -243,6 +367,13 @@ async function handleAddFlow(
   service: DistributorService,
   store: IConversationStore
 ): Promise<void> {
+  // Support cancellation during add conversation
+  if (text.toLowerCase() === 'cancel' || text === '❌ Cancel' || text === '/cancel') {
+    await store.delete(key);
+    await ctx.reply('❌ Cancelled.');
+    return;
+  }
+
   switch (state.step) {
     case 'name':
       state.data.name = text;
@@ -311,7 +442,7 @@ async function handleAddFlow(
         } catch (err: unknown) {
           await ctx.reply(`❌ ${(err as Error).message}`);
         }
-      } else if (text.toLowerCase() === 'cancel') {
+      } else if (text.toLowerCase() === 'cancel' || text === '❌ Cancel' || text === '/cancel') {
         await store.delete(key);
         await ctx.reply('❌ Cancelled.');
       } else {
@@ -331,6 +462,13 @@ async function handleEditFlow(
   service: DistributorService,
   store: IConversationStore
 ): Promise<void> {
+  // Support cancellation during edit conversation
+  if (text.toLowerCase() === 'cancel' || text === '❌ Cancel' || text === '/cancel') {
+    await store.delete(key);
+    await ctx.reply('❌ Cancelled.');
+    return;
+  }
+
   if (!state.distributorId) {
     await store.delete(key);
     return;
@@ -363,7 +501,11 @@ async function handleEditFlow(
   try {
     const updated = await service.update(state.distributorId, update);
     await store.delete(key);
-    await ctx.reply(`✅ Updated ${field} for ${updated.name}.`);
+    const detail = formatDistributorDetail(updated);
+    await ctx.reply(
+      `✅ Updated ${field} for *${escapeMarkdown(updated.name)}*\\.\n\n${detail}`,
+      { parse_mode: 'MarkdownV2' }
+    );
   } catch (err: unknown) {
     await ctx.reply(`❌ ${(err as Error).message}`);
     await store.delete(key);

@@ -97,6 +97,9 @@ export function createBot(options?: CreateBotOptions): {
     await bot.init();
     console.log(`🤖 Bot started as @${bot.botInfo.username} (ID: ${bot.botInfo.id})`);
 
+    // Register native bot commands menu with Telegram
+    await setupBotCommands(bot.api);
+
     // Start long polling
     await bot.start({
       onStart: () => {
@@ -108,3 +111,25 @@ export function createBot(options?: CreateBotOptions): {
 
   return { bot, start };
 }
+
+export const BOT_COMMANDS = [
+  { command: 'menu', description: 'Distributor management menu' },
+  { command: 'distributors', description: 'List registered distributors' },
+  { command: 'add_distributor', description: 'Add a new distributor' },
+  { command: 'amount', description: 'Set or update invoice amount' },
+  { command: 'add', description: 'Add amount or media to invoice' },
+  { command: 'note', description: 'Add note to invoice' },
+  { command: 'paid', description: 'Record payment / confirm invoice' },
+  { command: 'edit', description: 'Edit a message' },
+  { command: 'cancel', description: 'Cancel current action' },
+  { command: 'help', description: 'Show bot usage instructions' },
+];
+
+export async function setupBotCommands(api: any): Promise<void> {
+  try {
+    await api.setMyCommands(BOT_COMMANDS);
+  } catch (err: unknown) {
+    console.warn('Failed to register bot commands with Telegram:', (err as Error).message);
+  }
+}
+

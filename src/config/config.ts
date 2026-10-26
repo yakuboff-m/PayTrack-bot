@@ -34,18 +34,25 @@ function parseIntEnv(name: string): number {
   return parsed;
 }
 
-export function parseAdminIds(raw: string): number[] {
-  return raw
+export function parseAdminIds(raw: string | undefined | null): number[] {
+  if (!raw || typeof raw !== 'string') {
+    return [];
+  }
+  const entries = raw
     .split(',')
     .map((s) => s.trim())
-    .filter((s) => s.length > 0)
-    .map((s) => {
-      const id = parseInt(s, 10);
-      if (isNaN(id)) {
-        throw new Error(`Invalid admin user ID: "${s}"`);
-      }
-      return id;
-    });
+    .filter((s) => s.length > 0);
+
+  return entries.map((s) => {
+    if (!/^\d+$/.test(s)) {
+      throw new Error(`Invalid admin user ID: "${s}"`);
+    }
+    const id = parseInt(s, 10);
+    if (isNaN(id) || !Number.isSafeInteger(id) || id <= 0) {
+      throw new Error(`Invalid admin user ID: "${s}"`);
+    }
+    return id;
+  });
 }
 
 function parseRequiredInt(val: string | number | undefined, name: string): number {

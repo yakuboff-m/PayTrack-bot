@@ -3,7 +3,7 @@ import type { Env } from './database/d1.types';
 import { parseConfigFromEnv } from './config/config';
 import { D1DatabaseAdapter } from './database/adapter';
 import { DatabaseConversationStore } from './distributors/conversation.store';
-import { createBot } from './bot/bot';
+import { createBot, setupBotCommands, BOT_COMMANDS } from './bot/bot';
 
 export default {
   async fetch(
@@ -26,6 +26,37 @@ export default {
           headers: { 'Content-Type': 'application/json' },
         }
       );
+    }
+
+    // Bot commands registration endpoint for Cloudflare Workers
+    if (request.method === 'GET' && url.pathname === '/setup-commands') {
+      try {
+        const config = parseConfigFromEnv(env);
+        const { bot } = createBot({ config });
+        await setupBotCommands(bot.api);
+        return new Response(
+          JSON.stringify({
+            status: 'ok',
+            service: 'paytrack-bot',
+            commands: BOT_COMMANDS,
+          }),
+          {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          }
+        );
+      } catch (err: unknown) {
+        return new Response(
+          JSON.stringify({
+            status: 'error',
+            error: (err as Error).message,
+          }),
+          {
+            status: 500,
+            headers: { 'Content-Type': 'application/json' },
+          }
+        );
+      }
     }
 
     // Telegram Webhook endpoint (/webhook or /)

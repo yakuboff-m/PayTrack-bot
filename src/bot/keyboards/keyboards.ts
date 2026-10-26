@@ -1,5 +1,34 @@
-import { InlineKeyboard } from 'grammy';
+import { InlineKeyboard, Keyboard } from 'grammy';
 import type { Distributor } from '../../types';
+
+/**
+ * Builds the interactive reply keyboard for administrator distributor management.
+ */
+export function adminReplyKeyboard(): Keyboard {
+  return new Keyboard()
+    .text('🏢 Distributors')
+    .text('➕ Add Distributor')
+    .row()
+    .text('✏️ Edit Distributor')
+    .text('🗑️ Delete Distributor')
+    .row()
+    .text('❌ Cancel')
+    .resized();
+}
+
+/**
+ * Builds the inline keyboard for the admin menu panel.
+ */
+export function adminInlineMenuKeyboard(): InlineKeyboard {
+  return new InlineKeyboard()
+    .text('🏢 Distributors', 'dist:list')
+    .text('➕ Add Distributor', 'dist:add')
+    .row()
+    .text('✏️ Edit Distributor', 'dist:edit_select')
+    .text('🗑️ Delete Distributor', 'dist:delete_select')
+    .row()
+    .text('❌ Cancel', 'dist:cancel');
+}
 
 /**
  * Builds the inline keyboard for the /distributors list view.
@@ -8,9 +37,12 @@ import type { Distributor } from '../../types';
 export function distributorListKeyboard(isAdmin: boolean): InlineKeyboard {
   const kb = new InlineKeyboard();
   if (isAdmin) {
-    kb.text('➕ Add', 'dist:add')
+    kb.text('➕ Add Distributor', 'dist:add')
+      .row()
       .text('✏️ Edit', 'dist:edit_select')
-      .text('🗑 Delete', 'dist:delete_select');
+      .text('🗑 Delete', 'dist:delete_select')
+      .row()
+      .text('❌ Cancel', 'dist:cancel');
   }
   return kb;
 }

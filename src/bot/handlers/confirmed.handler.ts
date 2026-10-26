@@ -3,6 +3,7 @@ import type { Message } from 'grammy/types';
 import type { Transaction } from '../../types';
 import { TransactionService } from '../../transactions/transaction.service';
 import { getConfig, type Config } from '../../config/config';
+import { isAdmin } from '../middleware/auth.middleware';
 import {
   formatInvoiceId,
   parseInvoiceId,
@@ -70,7 +71,7 @@ export function registerConfirmedHandler(
       const repliedMediaMsg = getEffectiveRepliedMessage(msg);
       if (repliedMediaMsg && ((msg.photo && msg.photo.length > 0) || msg.document)) {
         const senderId = ctx.from?.id;
-        if (senderId && config.adminUserIds.includes(senderId)) {
+        if (senderId && isAdmin(senderId, config)) {
           const chatId = String(ctx.chat.id);
           const targetTx = await transactionService.findByAnyMessageId(chatId, repliedMediaMsg.message_id);
           if (targetTx && targetTx.status !== 'PAID') {
@@ -91,7 +92,7 @@ export function registerConfirmedHandler(
 
     // ── Check admin authorization ────────────────────────────
     const senderId = ctx.from?.id;
-    if (!senderId || !config.adminUserIds.includes(senderId)) {
+    if (!isAdmin(senderId, config)) {
       await ctx.reply('⛔ You are not authorized to confirm transactions.', {
         message_thread_id: msg.message_thread_id ?? config.pendingTopicId,
       });
