@@ -100,13 +100,17 @@ describe('Critical Transaction Workflow Audit & Repair Regression Suite', () => 
           throw new Error('Telegram API Error: sendMediaGroup failed');
         }
         const baseId = 8000 + sentMediaGroups.length * 10;
-        sentMediaGroups.push(payload);
         const results = payload.media.map((m: any, idx: number) => ({
           message_id: baseId + idx,
           chat: { id: payload.chat_id },
           date: Math.floor(Date.now() / 1000),
+          photo: m.type === 'photo' ? m.media : undefined,
+          document: m.type === 'document' ? { file_id: m.media } : undefined,
+          caption: m.caption,
           ...m,
         }));
+        sentMediaGroups.push({ ...payload, results });
+        sentMessages.push(...results);
         return { ok: true, result: results as any };
       }
 
@@ -572,7 +576,7 @@ describe('Critical Transaction Workflow Audit & Repair Regression Suite', () => 
     // Original pending invoice message updated with notice and direct link
     const edited = editedTexts.find((e) => e.message_id === 107);
     assert.ok(edited, 'Pending invoice message must have update notice');
-    assert.match(edited.text, /⚠️ Invoice #INV0001 was updated with additional media:/);
+    assert.match(edited.text, /⚠️ Invoice #INV0001 was updated/);
     assert.match(edited.text, /View updated invoice/);
 
     // New photo message sent with updated total and addition details

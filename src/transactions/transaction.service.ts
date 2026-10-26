@@ -1305,10 +1305,83 @@ export class TransactionService {
 
       if (hasAddedMedia) {
         // ── Case A: /add includes new invoice media ────────────────
-        // 1. Send a NEW, separate media message containing the newly added invoice media,
-        // with the complete invoice caption (design already specified) and account button attached.
+        // Collect all invoice media in chronological order:
+        // 1. Original invoice media (from registration)
+        // 2. All previous addition media (from earlier /add commands)
+        // 3. Newly added media from this /add command
+        interface InvoiceMediaItem {
+          fileId: string;
+          type: 'photo' | 'document';
+        }
+
+        const mediaItems: InvoiceMediaItem[] = [];
+
+        // 1. Original media
+        if (originalMediaFileId && originalMediaType) {
+          mediaItems.push({
+            fileId: originalMediaFileId,
+            type: originalMediaType as 'photo' | 'document',
+          });
+        }
+
+        // 2. Previous additions media
+        for (const prev of previousAdditions) {
+          if (prev.media_file_id && prev.media_type) {
+            mediaItems.push({
+              fileId: prev.media_file_id,
+              type: prev.media_type as 'photo' | 'document',
+            });
+          }
+        }
+
+        // 3. Newly added media
+        if (addPhoto) {
+          mediaItems.push({
+            fileId: addPhoto,
+            type: 'photo',
+          });
+        } else if (addDoc) {
+          mediaItems.push({
+            fileId: addDoc,
+            type: 'document',
+          });
+        }
+
+        const allPhotos = mediaItems.every((m) => m.type === 'photo');
+        const allDocs = mediaItems.every((m) => m.type === 'document');
+
         try {
-          if (addPhoto) {
+          if (mediaItems.length >= 2 && (allPhotos || allDocs)) {
+            // Telegram media group combining ALL media items together (original + all additions)
+            const groupType = allPhotos ? 'photo' : 'document';
+            const mediaGroup = mediaItems.map((item, idx) => ({
+              type: groupType,
+              media: item.fileId,
+              ...(idx === 0 ? { caption: safeCaption, parse_mode: 'HTML' as const } : {}),
+            }));
+
+            const sentMsgs = await api.sendMediaGroup(chatId, mediaGroup as any, {
+              message_thread_id: pendingTopicId,
+            });
+            newInvoiceMsg = sentMsgs[0];
+
+            // If distributor account details exist, send companion copy button message
+            if (keyboard && transaction.distributorSnapshot?.accountNumber) {
+              try {
+                const distName = transaction.distributorSnapshot.name || 'Account details';
+                const bankName = transaction.distributorSnapshot.bankName || '';
+                const accNum = transaction.distributorSnapshot.accountNumber;
+                const companionText = `💳 <b>${distName}</b> • ${bankName} <code>${accNum}</code>`;
+                await api.sendMessage(chatId, companionText, {
+                  message_thread_id: pendingTopicId,
+                  reply_markup: keyboard,
+                  parse_mode: 'HTML',
+                });
+              } catch (btnErr) {
+                console.warn('Failed to send companion keyboard message:', (btnErr as Error).message);
+              }
+            }
+          } else if (addPhoto) {
             newInvoiceMsg = await api.sendPhoto(chatId, addPhoto, {
               caption: safeCaption,
               message_thread_id: pendingTopicId,
@@ -1373,6 +1446,18 @@ export class TransactionService {
             }
           }
           console.warn(`Failed to update original invoice notice ${targetMessageId}:`, (err as Error).message);
+        }
+
+        if (transaction.originalMessageId && transaction.originalMessageId !== targetMessageId) {
+          try {
+            await api.editMessageCaption(chatId, transaction.originalMessageId, {
+              caption: supersededNotice,
+              parse_mode: 'HTML',
+              reply_markup: { inline_keyboard: [] },
+            });
+          } catch {
+            /* best effort */
+          }
         }
 
         // 3. Persist new primary message ID in DB (so subsequent operations target this active invoice), preserving superseded message in history

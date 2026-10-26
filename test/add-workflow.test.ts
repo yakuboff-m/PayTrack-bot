@@ -95,13 +95,17 @@ async function setupTestContext() {
 
     if (method === 'sendMediaGroup') {
       const baseId = 8000 + sentMediaGroups.length * 10;
-      sentMediaGroups.push(payload);
       const results = payload.media.map((m: any, idx: number) => ({
         message_id: baseId + idx,
         chat: { id: payload.chat_id },
         date: Math.floor(Date.now() / 1000),
+        photo: m.type === 'photo' ? m.media : undefined,
+        document: m.type === 'document' ? { file_id: m.media } : undefined,
+        caption: m.caption,
         ...m,
       }));
+      sentMediaGroups.push({ ...payload, results });
+      sentMessages.push(...results);
       return { ok: true, result: results as any };
     }
 
@@ -192,11 +196,13 @@ describe('/add Workflow Regression Suite', () => {
       },
     } as any);
 
-    // Assert new media message was sent containing added photo, full caption, and keyboard
-    const newMediaMsg = ctx.sentMessages.find((m) => m.photo === 'photo_add_1');
-    assert.ok(newMediaMsg, 'New media message must be sent with added photo');
+    // Assert media group was sent containing both original photo and added photo
+    const origPhotoMsg = ctx.sentMessages.find((m) => m.photo === 'photo_initial_1');
+    const addedPhotoMsg = ctx.sentMessages.find((m) => m.photo === 'photo_add_1');
+    assert.ok(origPhotoMsg, 'Original photo must be present in media group');
+    assert.ok(addedPhotoMsg, 'New media message must be sent with added photo');
 
-    const primaryCaption = newMediaMsg.caption;
+    const primaryCaption = origPhotoMsg.caption;
     assert.ok(primaryCaption);
     assert.match(primaryCaption, /🧾 INVOICE • #INV0001/);
     assert.match(primaryCaption, /🏢 Meat Supplier/);
@@ -213,19 +219,18 @@ describe('/add Workflow Regression Suite', () => {
     const headingMatches = primaryCaption.match(/🧾 INVOICE • #INV0001/g);
     assert.equal(headingMatches?.length, 1, 'Heading must appear exactly once');
 
-    // Copy Account Number button is attached directly to the new media message
-    assert.equal(
-      newMediaMsg.reply_markup?.inline_keyboard?.[0]?.[0]?.text,
-      'Copy Account Number',
-      'Copy Account Number button must be attached directly to the new media message'
+    // Copy Account Number button is attached to companion message
+    const buttonMsg = ctx.sentMessages.find(
+      (m) => m.reply_markup?.inline_keyboard?.[0]?.[0]?.text === 'Copy Account Number'
     );
+    assert.ok(buttonMsg, 'Copy Account Number button message must be present');
 
     // Assert original invoice message (501) was updated with notice and direct link
     const origEdited = ctx.editedCaptions.find((e) => e.message_id === 501);
     assert.ok(origEdited, 'Original invoice message 501 must have update notice');
     assert.match(
       origEdited.caption,
-      /⚠️ Invoice #INV0001 was updated with additional media: <a href=".*?">View updated invoice<\/a>\. The original invoice media remains unchanged\./
+      /⚠️ Invoice #INV0001 was updated\. View the updated invoice: <a href=".*?">View updated invoice<\/a>\. The original invoice media remains unchanged\. Please delete this original message manually if no longer needed\./
     );
     assert.deepEqual(origEdited.reply_markup?.inline_keyboard, [], 'Keyboard must be removed from old message');
 
@@ -244,7 +249,7 @@ describe('/add Workflow Regression Suite', () => {
     // Assert DB total updated and addition recorded separately
     const updatedTx = (await ctx.txRepo.findById(tx.id))!;
     assert.equal(updatedTx.amount, 470000);
-    assert.equal(updatedTx.metadata_message_id, newMediaMsg.message_id);
+    assert.equal(updatedTx.metadata_message_id, origPhotoMsg.message_id);
     assert.equal(updatedTx.media_file_id, 'photo_initial_1', 'Original media identity permanently preserved');
     assert.equal(updatedTx.media_type, 'photo');
 
@@ -293,24 +298,26 @@ describe('/add Workflow Regression Suite', () => {
       },
     } as any);
 
-    // Assert new media message was sent containing added document, full caption, and keyboard
-    const newDocMsg = ctx.sentMessages.find((m) => m.document === 'doc_add_2');
-    assert.ok(newDocMsg, 'New document message must be sent');
-    assert.match(newDocMsg.caption, /💰 Invoice Total: ₩150,000/);
-    assert.match(newDocMsg.caption, /⚖️ Need to Pay: ₩150,000/);
+    // Assert document media group was sent containing both documents
+    const origDoc = ctx.sentMessages.find((m) => m.document?.file_id === 'doc_initial_1');
+    const addedDoc = ctx.sentMessages.find((m) => m.document?.file_id === 'doc_add_2');
+    assert.ok(origDoc, 'Original document must be present in media group');
+    assert.ok(addedDoc, 'Added document must be present in media group');
+    assert.match(origDoc.caption, /💰 Invoice Total: ₩150,000/);
+    assert.match(origDoc.caption, /⚖️ Need to Pay: ₩150,000/);
 
-    // Assert keyboard with Copy Account Number attached to new document message
-    assert.equal(
-      newDocMsg.reply_markup?.inline_keyboard?.[0]?.[0]?.text,
-      'Copy Account Number'
+    // Assert companion button message with Copy Account Number
+    const buttonMsg = ctx.sentMessages.find(
+      (m) => m.reply_markup?.inline_keyboard?.[0]?.[0]?.text === 'Copy Account Number'
     );
+    assert.ok(buttonMsg, 'Copy Account Number button message must be present');
 
     // Assert original document message (502) has update notice and direct link
     const origEdited = ctx.editedCaptions.find((e) => e.message_id === 502);
     assert.ok(origEdited, 'Original message 502 must have update notice');
     assert.match(
       origEdited.caption,
-      /⚠️ Invoice #INV0001 was updated with additional media: <a href=".*?">View updated invoice<\/a>\. The original invoice media remains unchanged\./
+      /⚠️ Invoice #INV0001 was updated\. View the updated invoice: <a href=".*?">View updated invoice<\/a>\. The original invoice media remains unchanged\. Please delete this original message manually if no longer needed\./
     );
     assert.deepEqual(origEdited.reply_markup?.inline_keyboard, []);
 
@@ -321,7 +328,7 @@ describe('/add Workflow Regression Suite', () => {
     assert.equal(separateAccountMsgs.length, 0, 'Must NOT send separate account details message');
 
     const updatedTx = (await ctx.txRepo.findById(tx.id))!;
-    assert.equal(updatedTx.metadata_message_id, newDocMsg.message_id);
+    assert.equal(updatedTx.metadata_message_id, origDoc.message_id);
     assert.equal(updatedTx.media_file_id, 'doc_initial_1');
     assert.equal(updatedTx.media_type, 'document');
 
@@ -384,7 +391,7 @@ describe('/add Workflow Regression Suite', () => {
     assert.ok(origEdited, 'Original photo message 503 must have update notice');
     assert.match(
       origEdited.caption,
-      /⚠️ Invoice #INV0001 was updated with additional media: <a href=".*?">View updated invoice<\/a>\. The original invoice media remains unchanged\./
+      /⚠️ Invoice #INV0001 was updated\. View the updated invoice: <a href=".*?">View updated invoice<\/a>\. The original invoice media remains unchanged\. Please delete this original message manually if no longer needed\./
     );
     assert.deepEqual(origEdited.reply_markup?.inline_keyboard, []);
 
@@ -512,25 +519,27 @@ describe('/add Workflow Regression Suite', () => {
     const totalPaid = await ctx.txRepo.getTotalPaid(tx.id);
     assert.equal(totalPaid, 100000, 'Total paid must remain 100k');
 
-    // Assert new media message was sent containing added photo, updated financial progress, and keyboard
-    const newMediaMsg = ctx.sentMessages.find((m) => m.photo === 'photo_partial_add');
-    assert.ok(newMediaMsg, 'New media message must be sent with added photo');
-    assert.match(newMediaMsg.caption, /💰 Invoice Total: ₩350,000/);
-    assert.match(newMediaMsg.caption, /💵 Total Paid: ₩100,000/);
-    assert.match(newMediaMsg.caption, /⚖️ Need to Pay: ₩250,000/);
+    // Assert media group was sent containing both photos
+    const origPhotoMsg = ctx.sentMessages.find((m) => m.photo === 'photo_orig');
+    const addedPhotoMsg = ctx.sentMessages.find((m) => m.photo === 'photo_partial_add');
+    assert.ok(origPhotoMsg, 'Original photo must be present in media group');
+    assert.ok(addedPhotoMsg, 'New media message must be sent with added photo');
+    assert.match(origPhotoMsg.caption, /💰 Invoice Total: ₩350,000/);
+    assert.match(origPhotoMsg.caption, /💵 Total Paid: ₩100,000/);
+    assert.match(origPhotoMsg.caption, /⚖️ Need to Pay: ₩250,000/);
 
-    // Assert keyboard with Copy Account Number attached to new media message
-    assert.equal(
-      newMediaMsg.reply_markup?.inline_keyboard?.[0]?.[0]?.text,
-      'Copy Account Number'
+    // Assert companion button message with Copy Account Number
+    const buttonMsg = ctx.sentMessages.find(
+      (m) => m.reply_markup?.inline_keyboard?.[0]?.[0]?.text === 'Copy Account Number'
     );
+    assert.ok(buttonMsg, 'Copy Account Number button message must be present');
 
     // Assert original invoice message 505 was updated with notice and direct link
     const origEdited = ctx.editedCaptions.find((e) => e.message_id === 505);
     assert.ok(origEdited, 'Original invoice message 505 must have update notice');
     assert.match(
       origEdited.caption,
-      /⚠️ Invoice #INV0001 was updated with additional media: <a href=".*?">View updated invoice<\/a>\. The original invoice media remains unchanged\./
+      /⚠️ Invoice #INV0001 was updated\. View the updated invoice: <a href=".*?">View updated invoice<\/a>\. The original invoice media remains unchanged\. Please delete this original message manually if no longer needed\./
     );
     assert.deepEqual(origEdited.reply_markup?.inline_keyboard, []);
 
@@ -676,12 +685,14 @@ describe('/add Workflow Regression Suite', () => {
       },
     } as any);
 
-    // 1. New media message sent with added photo, full caption, and keyboard
+    // 1. Media group sent containing both original photo and added photo
+    const origPhotoMsg = ctx.sentMessages.find((m) => m.photo === 'photo_invoice_12345_inv0015');
     const newPhotoMsg = ctx.sentMessages.find((m) => m.photo === 'photo_book_cover_inv0015');
+    assert.ok(origPhotoMsg, 'Original photo must be present in media group');
     assert.ok(newPhotoMsg, 'New media message must be sent with added photo');
 
     // 2. Caption includes invoice identity, distributor, action history, and financial summary
-    const primaryCaption = newPhotoMsg.caption;
+    const primaryCaption = origPhotoMsg.caption;
     assert.match(primaryCaption, /🧾 INVOICE • #INV0001/);
     assert.match(primaryCaption, /🏢 Koreta/);
     assert.match(primaryCaption, /💳 Hana Bank 012-345678-2341/);
@@ -696,19 +707,18 @@ describe('/add Workflow Regression Suite', () => {
     assert.match(primaryCaption, /⚖️ Need to Pay: ₩650,000/);
     assert.match(primaryCaption, /📊 Status: ⏳ PENDING/);
 
-    // 3. Inline keyboard with Copy Account Number attached directly to new media message
-    assert.equal(
-      newPhotoMsg.reply_markup?.inline_keyboard?.[0]?.[0]?.text,
-      'Copy Account Number',
-      'Copy Account Number button must be attached directly to the new media message'
+    // 3. Companion message with Copy Account Number exists
+    const buttonMsg = ctx.sentMessages.find(
+      (m) => m.reply_markup?.inline_keyboard?.[0]?.[0]?.text === 'Copy Account Number'
     );
+    assert.ok(buttonMsg, 'Copy Account Number button message must be present');
 
     // 4. Assert original invoice message 901 was updated with notice and direct link
     const origEdited = ctx.editedCaptions.find((e) => e.message_id === 901);
     assert.ok(origEdited, 'Original invoice message 901 must have update notice');
     assert.match(
       origEdited.caption,
-      /⚠️ Invoice #INV0001 was updated with additional media: <a href=".*?">View updated invoice<\/a>\. The original invoice media remains unchanged\./
+      /⚠️ Invoice #INV0001 was updated\. View the updated invoice: <a href=".*?">View updated invoice<\/a>\. The original invoice media remains unchanged\. Please delete this original message manually if no longer needed\./
     );
     assert.deepEqual(origEdited.reply_markup?.inline_keyboard, []);
 
@@ -722,7 +732,7 @@ describe('/add Workflow Regression Suite', () => {
     const updatedTx = (await ctx.txRepo.findById(tx.id))!;
     assert.equal(updatedTx.amount, 650000, 'DB invoice total must be 650,000');
     assert.equal(updatedTx.status, 'PENDING');
-    assert.equal(updatedTx.metadata_message_id, newPhotoMsg.message_id);
+    assert.equal(updatedTx.metadata_message_id, origPhotoMsg.message_id);
     assert.equal(updatedTx.media_file_id, 'photo_invoice_12345_inv0015', 'Original media preserved in DB');
     assert.equal(updatedTx.media_type, 'photo');
 
@@ -774,19 +784,21 @@ describe('/add Workflow Regression Suite', () => {
     assert.equal(updatedTx.media_file_id, 'orig_photo_450k', 'Original media file ID must remain intact');
     assert.equal(updatedTx.media_type, 'photo');
 
-    // 4. Assert new media message was sent containing second photo, full caption, and keyboard
+    // 4. Assert media group was sent containing both original photo and second photo
+    const origPhotoMsg = ctx.sentMessages.find((m) => m.photo === 'orig_photo_450k');
     const newPhotoMsg = ctx.sentMessages.find((m) => m.photo === 'second_photo_50k');
+    assert.ok(origPhotoMsg, 'Original photo must be present in media group');
     assert.ok(newPhotoMsg, 'New media message must be sent with added photo');
 
     // 5. Assert updated total is ₩500,000 and action history preserves registration and addition
     assert.equal(updatedTx.amount, 500000, 'Updated total must be ₩500,000');
-    assert.equal(updatedTx.metadata_message_id, newPhotoMsg.message_id);
+    assert.equal(updatedTx.metadata_message_id, origPhotoMsg.message_id);
     const additions = await ctx.txRepo.getAdditions(tx.id);
     assert.equal(additions.length, 1);
     assert.equal(additions[0].amount, 50000);
     assert.equal(additions[0].note, 'Delivery fee');
 
-    const primaryCaption = newPhotoMsg.caption;
+    const primaryCaption = origPhotoMsg.caption;
     assert.ok(primaryCaption);
     assert.match(primaryCaption, /📥 Original Registration:/);
     assert.match(primaryCaption, /💵 Registered Amount:\n└─> 💰 ₩450,000/);
@@ -796,19 +808,18 @@ describe('/add Workflow Regression Suite', () => {
     assert.match(primaryCaption, /💰 Invoice Total: ₩500,000/);
     assert.match(primaryCaption, /⚖️ Need to Pay: ₩500,000/);
 
-    // 6. Assert Copy Account Number button is attached directly to the new media message
-    assert.equal(
-      newPhotoMsg.reply_markup?.inline_keyboard?.[0]?.[0]?.text,
-      'Copy Account Number',
-      'Copy Account Number button must be attached directly to the new media message'
+    // 6. Assert Copy Account Number button is attached to companion message
+    const buttonMsg = ctx.sentMessages.find(
+      (m) => m.reply_markup?.inline_keyboard?.[0]?.[0]?.text === 'Copy Account Number'
     );
+    assert.ok(buttonMsg, 'Copy Account Number button message must be present');
 
     // 7. Assert original message 701 was updated with notice and direct link
     const origEdited = ctx.editedCaptions.find((e) => e.message_id === 701);
     assert.ok(origEdited, 'Original invoice message 701 must have update notice');
     assert.match(
       origEdited.caption,
-      /⚠️ Invoice #INV0001 was updated with additional media: <a href=".*?">View updated invoice<\/a>\. The original invoice media remains unchanged\./
+      /⚠️ Invoice #INV0001 was updated\. View the updated invoice: <a href=".*?">View updated invoice<\/a>\. The original invoice media remains unchanged\. Please delete this original message manually if no longer needed\./
     );
     assert.deepEqual(origEdited.reply_markup?.inline_keyboard, []);
 

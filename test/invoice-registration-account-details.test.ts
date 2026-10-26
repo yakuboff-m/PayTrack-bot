@@ -82,6 +82,24 @@ async function setupTestContext() {
       return { ok: true, result: msg as any };
     }
 
+    if (method === 'sendMediaGroup') {
+      const baseId = 8000 + sentMessages.length * 10;
+      const results = payload.media.map((m: any, idx: number) => {
+        const msg = {
+          message_id: baseId + idx,
+          chat: { id: payload.chat_id },
+          message_thread_id: payload.message_thread_id,
+          date: Math.floor(Date.now() / 1000),
+          photo: m.type === 'photo' ? m.media : undefined,
+          document: m.type === 'document' ? { file_id: m.media } : undefined,
+          caption: m.caption,
+        };
+        sentMessages.push(msg);
+        return msg;
+      });
+      return { ok: true, result: results as any };
+    }
+
     if (method === 'copyMessage') {
       const id = 8500 + sentMessages.length;
       const msg = {
@@ -262,41 +280,38 @@ describe('Regression: Integrated Account Details in Invoice Caption & Keyboard',
       },
     } as any);
 
-    // Assert: New media message was sent containing the added photo, full caption, and keyboard
-    const newMediaMsg = ctx.sentMessages.find((m) => m.photo === 'photo_addition_media');
-    assert.ok(newMediaMsg, 'New media message must be sent with added photo');
+    // Assert: Media group was sent containing both the original photo and the added photo
+    const origInAlbum = ctx.sentMessages.find((m) => m.photo === 'photo_original_media');
+    const addInAlbum = ctx.sentMessages.find((m) => m.photo === 'photo_addition_media');
+    assert.ok(origInAlbum, 'Original photo must be present in media group');
+    assert.ok(addInAlbum, 'Added photo must be present in media group');
 
-    // Caption contains updated action history and new financial summary
-    assert.match(newMediaMsg.caption, /🧾 INVOICE • #INV0001/);
-    assert.match(newMediaMsg.caption, /📥 Original Registration:/);
-    assert.match(newMediaMsg.caption, /💵 Registered Amount:\n└─> 💰 ₩300,000/);
-    assert.match(newMediaMsg.caption, /➕ Invoice Addition/);
-    assert.match(newMediaMsg.caption, /💵 Amount Added:\n└─> 💰 ₩150,000/);
-    assert.match(newMediaMsg.caption, /📝 Note: Special marinade/);
-    assert.match(newMediaMsg.caption, /💰 Invoice Total: ₩450,000/);
-    assert.match(newMediaMsg.caption, /⚖️ Need to Pay: ₩450,000/);
+    // Caption is on the primary message (the first message in the album)
+    const albumCaption = origInAlbum.caption;
+    assert.ok(albumCaption);
+    assert.match(albumCaption, /🧾 INVOICE • #INV0001/);
+    assert.match(albumCaption, /📥 Original Registration:/);
+    assert.match(albumCaption, /💵 Registered Amount:\n└─> 💰 ₩300,000/);
+    assert.match(albumCaption, /➕ Invoice Addition/);
+    assert.match(albumCaption, /💵 Amount Added:\n└─> 💰 ₩150,000/);
+    assert.match(albumCaption, /📝 Note: Special marinade/);
+    assert.match(albumCaption, /💰 Invoice Total: ₩450,000/);
+    assert.match(albumCaption, /⚖️ Need to Pay: ₩450,000/);
 
-    // Copy Account Number button is attached directly to the new media message
-    assert.equal(
-      newMediaMsg.reply_markup?.inline_keyboard?.[0]?.[0]?.text,
-      'Copy Account Number',
-      'Button must be attached to the new media message'
+    // Copy Account Number button is attached to companion message
+    const buttonMsg = ctx.sentMessages.find(
+      (m) => m.reply_markup?.inline_keyboard?.[0]?.[0]?.text === 'Copy Account Number'
     );
+    assert.ok(buttonMsg, 'Button message must be sent with Copy Account Number');
 
     // Assert: Original invoice message 200 was updated with clear notice and direct link
     const origEdited = ctx.editedCaptions.find((e) => e.message_id === 200);
     assert.ok(origEdited, 'Original invoice message 200 must have update notice');
     assert.match(
       origEdited.caption,
-      /⚠️ Invoice #INV0001 was updated with additional media: <a href=".*?">View updated invoice<\/a>\. The original invoice media remains unchanged\./
+      /⚠️ Invoice #INV0001 was updated\. View the updated invoice: <a href=".*?">View updated invoice<\/a>\. The original invoice media remains unchanged\. Please delete this original message manually if no longer needed\./
     );
     assert.deepEqual(origEdited.reply_markup?.inline_keyboard, [], 'Keyboard must be removed from original message');
-
-    // Assert: NO separate generic account details message was sent
-    const separateAccountMessages = ctx.sentMessages.filter(
-      (m) => typeof m.text === 'string' && m.text.includes('Account details for')
-    );
-    assert.equal(separateAccountMessages.length, 0, 'Must NOT send separate account details message');
 
     // Assert: NO generic companion message was sent
     const genericCompanionMsgs = ctx.sentMessages.filter(
@@ -309,7 +324,7 @@ describe('Regression: Integrated Account Details in Invoice Caption & Keyboard',
     assert.equal(updatedTx.media_file_id, 'photo_original_media', 'Original media must be preserved');
     assert.equal(updatedTx.media_type, 'photo');
     assert.equal(updatedTx.amount, 450000, 'Amount must be updated to 450,000');
-    assert.equal(updatedTx.metadata_message_id, newMediaMsg.message_id);
+    assert.equal(updatedTx.metadata_message_id, origInAlbum.message_id);
 
     // Admin /add message was deleted
     assert.ok(ctx.deletedMessageIds.includes(201));
@@ -582,41 +597,85 @@ describe('Regression: Integrated Account Details in Invoice Caption & Keyboard',
       },
     } as any);
 
-    // Assert: New media message sent containing seq_added_photo, unified caption, and keyboard
-    const addedMediaMsg = ctx.sentMessages.find((m) => m.photo === 'seq_added_photo');
-    assert.ok(addedMediaMsg, 'Newly added media must be sent as a new message');
-    const activeMsgId = addedMediaMsg.message_id;
+    // Assert: Media group sent containing both original photo and added photo
+    const origInAlbum = ctx.sentMessages
+      .filter((m) => m.photo === 'seq_original_photo')
+      .pop()!;
+    const addInAlbum = ctx.sentMessages.find((m) => m.photo === 'seq_added_photo');
+    assert.ok(origInAlbum, 'Original photo must be present in media group');
+    assert.ok(addInAlbum, 'Added photo must be present in media group');
+    const activeMsgId = origInAlbum.message_id;
 
-    assert.match(addedMediaMsg.caption, /🧾 INVOICE • #INV0001/);
-    assert.match(addedMediaMsg.caption, /📥 Original Registration:/);
-    assert.match(addedMediaMsg.caption, /💵 Registered Amount:\n└─> 💰 ₩300,000/);
-    assert.match(addedMediaMsg.caption, /➕ Invoice Addition/);
-    assert.match(addedMediaMsg.caption, /💵 Amount Added:\n└─> 💰 ₩100,000/);
-    assert.match(addedMediaMsg.caption, /📝 Note: Delivery charge/);
-    assert.match(addedMediaMsg.caption, /💰 Invoice Total: ₩400,000/);
-    assert.match(addedMediaMsg.caption, /⚖️ Need to Pay: ₩400,000/);
-    assert.equal(addedMediaMsg.reply_markup?.inline_keyboard?.[0]?.[0]?.text, 'Copy Account Number');
+    assert.match(origInAlbum.caption, /🧾 INVOICE • #INV0001/);
+    assert.match(origInAlbum.caption, /📥 Original Registration:/);
+    assert.match(origInAlbum.caption, /💵 Registered Amount:\n└─> 💰 ₩300,000/);
+    assert.match(origInAlbum.caption, /➕ Invoice Addition/);
+    assert.match(origInAlbum.caption, /💵 Amount Added:\n└─> 💰 ₩100,000/);
+    assert.match(origInAlbum.caption, /📝 Note: Delivery charge/);
+    assert.match(origInAlbum.caption, /💰 Invoice Total: ₩400,000/);
+    assert.match(origInAlbum.caption, /⚖️ Need to Pay: ₩400,000/);
+
+    // Companion button message exists
+    const buttonMsg1 = ctx.sentMessages.find(
+      (m) => m.reply_markup?.inline_keyboard?.[0]?.[0]?.text === 'Copy Account Number'
+    );
+    assert.ok(buttonMsg1, 'Copy Account Number button must be present');
 
     // Assert: Original message was edited with notice & link, and keyboard was removed
     const origEdited = ctx.editedCaptions.find((e) => e.message_id === origInvoiceMsgId);
     assert.ok(origEdited, 'Original invoice message must have notice edited');
     assert.match(
       origEdited.caption,
-      /⚠️ Invoice #INV0001 was updated with additional media: <a href=".*?">View updated invoice<\/a>\. The original invoice media remains unchanged\./
+      /⚠️ Invoice #INV0001 was updated\. View the updated invoice: <a href=".*?">View updated invoice<\/a>\. The original invoice media remains unchanged\. Please delete this original message manually if no longer needed\./
     );
     assert.deepEqual(origEdited.reply_markup?.inline_keyboard, [], 'Keyboard must be cleared from original message');
-
-    // Assert: No generic companion messages
-    const genericCompanions = ctx.sentMessages.filter(
-      (m) => typeof m.caption === 'string' && m.caption.includes('Additional invoice media for')
-    );
-    assert.equal(genericCompanions.length, 0);
 
     // Assert: Original media identity is preserved in DB
     tx = (await ctx.txRepo.findById(1))!;
     assert.equal(tx.media_file_id, 'seq_original_photo', 'Original media must be permanently preserved');
     assert.equal(tx.amount, 400000);
     assert.equal(tx.metadata_message_id, activeMsgId, 'Metadata message id points to active message');
+
+    // ----------------------------------------------------
+    // Step 2b: another /add 50000 with additional media (cumulative media check)
+    // ----------------------------------------------------
+    await ctx.bot.handleUpdate({
+      update_id: 122,
+      message: {
+        message_id: 10022,
+        from: { id: 111, is_bot: false },
+        chat: { id: testConfig.telegramGroupId, type: 'supergroup' },
+        message_thread_id: testConfig.pendingTopicId,
+        photo: [{ file_id: 'seq_second_added_photo', width: 800, height: 600 }],
+        caption: '/add 50000 Packing fee',
+        reply_to_message: {
+          message_id: activeMsgId,
+          chat: { id: testConfig.telegramGroupId },
+          message_thread_id: testConfig.pendingTopicId,
+          photo: [{ file_id: 'seq_original_photo' }],
+          caption: origInAlbum.caption,
+        },
+      },
+    } as any);
+
+    // Verify 3-item media group sent containing original photo, 1st added photo, and 2nd added photo
+    const secondAlbumPrimary = ctx.sentMessages
+      .filter((m) => m.photo === 'seq_original_photo')
+      .pop()!;
+    assert.ok(secondAlbumPrimary, 'New album message must be sent with all media');
+    const newActiveMsgId = secondAlbumPrimary.message_id;
+
+    assert.match(secondAlbumPrimary.caption, /🧾 INVOICE • #INV0001/);
+    assert.match(secondAlbumPrimary.caption, /💵 Registered Amount:\n└─> 💰 ₩300,000/);
+    assert.match(secondAlbumPrimary.caption, /💵 Amount Added:\n└─> 💰 ₩100,000/);
+    assert.match(secondAlbumPrimary.caption, /💵 Amount Added:\n└─> 💰 ₩50,000/);
+    assert.match(secondAlbumPrimary.caption, /📝 Note: Packing fee/);
+    assert.match(secondAlbumPrimary.caption, /💰 Invoice Total: ₩450,000/);
+    assert.match(secondAlbumPrimary.caption, /⚖️ Need to Pay: ₩450,000/);
+
+    // Also assert 2nd added photo is present in sent messages
+    const secondAddedInAlbum = ctx.sentMessages.find((m) => m.photo === 'seq_second_added_photo');
+    assert.ok(secondAddedInAlbum, 'Second added photo must be present in media group');
 
     // ----------------------------------------------------
     // Step 3: /note on the active invoice message
@@ -630,24 +689,19 @@ describe('Regression: Integrated Account Details in Invoice Caption & Keyboard',
         message_thread_id: testConfig.pendingTopicId,
         text: '/note Quality checked by supervisor',
         reply_to_message: {
-          message_id: activeMsgId,
+          message_id: newActiveMsgId,
           chat: { id: testConfig.telegramGroupId },
           message_thread_id: testConfig.pendingTopicId,
-          photo: [{ file_id: 'seq_added_photo' }],
-          caption: addedMediaMsg.caption,
+          photo: [{ file_id: 'seq_original_photo' }],
+          caption: secondAlbumPrimary.caption,
         },
       },
     } as any);
 
-    const noteEdited = ctx.editedCaptions.find((e) => e.message_id === activeMsgId);
+    const noteEdited = ctx.editedCaptions.find((e) => e.message_id === newActiveMsgId);
     assert.ok(noteEdited, 'Active invoice message must be edited with note');
     assert.match(noteEdited.caption, /📝 Note: Quality checked by supervisor/);
-    assert.match(noteEdited.caption, /💰 Invoice Total: ₩400,000/);
-    assert.equal(noteEdited.reply_markup?.inline_keyboard?.[0]?.[0]?.text, 'Copy Account Number');
-
-    // Original message remains untouched
-    const origEditsCount = ctx.editedCaptions.filter((e) => e.message_id === origInvoiceMsgId).length;
-    assert.equal(origEditsCount, 1, 'Original message should only have received the single update notice');
+    assert.match(noteEdited.caption, /💰 Invoice Total: ₩450,000/);
 
     // ----------------------------------------------------
     // Step 4: Partial payment (/paid 150000)
@@ -662,22 +716,21 @@ describe('Regression: Integrated Account Details in Invoice Caption & Keyboard',
         photo: [{ file_id: 'seq_receipt_photo_1', width: 600, height: 800 }],
         caption: '/paid 150000 Deposit 1',
         reply_to_message: {
-          message_id: activeMsgId,
+          message_id: newActiveMsgId,
           chat: { id: testConfig.telegramGroupId },
           message_thread_id: testConfig.pendingTopicId,
-          photo: [{ file_id: 'seq_added_photo' }],
+          photo: [{ file_id: 'seq_original_photo' }],
           caption: noteEdited.caption,
         },
       },
     } as any);
 
     // Active message in Pending is edited with partial payment info
-    const partialEdited = ctx.editedCaptions.filter((e) => e.message_id === activeMsgId).pop()!;
+    const partialEdited = ctx.editedCaptions.filter((e) => e.message_id === newActiveMsgId).pop()!;
     assert.ok(partialEdited);
     assert.match(partialEdited.caption, /💵 Total Paid: ₩150,000/);
-    assert.match(partialEdited.caption, /⚖️ Need to Pay: ₩250,000/);
+    assert.match(partialEdited.caption, /⚖️ Need to Pay: ₩300,000/);
     assert.match(partialEdited.caption, /📊 Status: ⏳ PARTIALLY PAID/);
-    assert.equal(partialEdited.reply_markup?.inline_keyboard?.[0]?.[0]?.text, 'Copy Account Number');
 
     // Confirmed topic receives ordinary visible text message
     const partialConfirmedText = ctx.sentMessages.find(
@@ -697,7 +750,7 @@ describe('Regression: Integrated Account Details in Invoice Caption & Keyboard',
     assert.ok(partialReceiptCopy, 'Receipt media must be copied into Confirmed topic');
 
     // ----------------------------------------------------
-    // Step 5: Full payment (/paid 250000)
+    // Step 5: Full payment (/paid 300000)
     // ----------------------------------------------------
     await ctx.bot.handleUpdate({
       update_id: 15,
@@ -707,19 +760,19 @@ describe('Regression: Integrated Account Details in Invoice Caption & Keyboard',
         chat: { id: testConfig.telegramGroupId, type: 'supergroup' },
         message_thread_id: testConfig.pendingTopicId,
         photo: [{ file_id: 'seq_receipt_photo_2', width: 600, height: 800 }],
-        caption: '/paid 250000 Final settlement',
+        caption: '/paid 300000 Final settlement',
         reply_to_message: {
-          message_id: activeMsgId,
+          message_id: newActiveMsgId,
           chat: { id: testConfig.telegramGroupId },
           message_thread_id: testConfig.pendingTopicId,
-          photo: [{ file_id: 'seq_added_photo' }],
+          photo: [{ file_id: 'seq_original_photo' }],
           caption: partialEdited.caption,
         },
       },
     } as any);
 
     // Pending active message is updated to PAID, keyboard removed
-    const fullEdited = ctx.editedCaptions.filter((e) => e.message_id === activeMsgId).pop()!;
+    const fullEdited = ctx.editedCaptions.filter((e) => e.message_id === newActiveMsgId).pop()!;
     assert.ok(fullEdited);
     assert.match(fullEdited.caption, /✅ PAID/);
     assert.deepEqual(fullEdited.reply_markup?.inline_keyboard, [], 'Keyboard must be removed upon full payment');
@@ -734,16 +787,16 @@ describe('Regression: Integrated Account Details in Invoice Caption & Keyboard',
     );
     assert.ok(fullConfirmedText, 'Full payment confirmation must be ordinary visible text message');
     assert.match(fullConfirmedText.text, /#INV0001/);
-    assert.match(fullConfirmedText.text, /₩250,000/);
-    assert.match(fullConfirmedText.text, /₩400,000/);
+    assert.match(fullConfirmedText.text, /₩300,000/);
+    assert.match(fullConfirmedText.text, /₩450,000/);
 
     // Final DB state checks
     tx = (await ctx.txRepo.findById(1))!;
     assert.equal(tx.status, 'PAID');
-    assert.equal(tx.amount, 400000);
+    assert.equal(tx.amount, 450000);
     const payments = await ctx.txRepo.getPayments(1);
     const totalPaid = payments.reduce((sum, p) => sum + p.amount, 0);
-    assert.equal(totalPaid, 400000);
+    assert.equal(totalPaid, 450000);
     assert.equal(tx.media_file_id, 'seq_original_photo', 'Original media identity remains permanently untouched');
 
     // Ensure no orphan or separate account messages ever created

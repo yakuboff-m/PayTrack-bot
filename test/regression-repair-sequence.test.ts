@@ -105,6 +105,9 @@ async function setupTestHarness() {
         message_id: baseId + idx,
         chat: { id: payload.chat_id },
         date: Math.floor(Date.now() / 1000),
+        photo: m.type === 'photo' ? m.media : undefined,
+        document: m.type === 'document' ? m.media : undefined,
+        caption: m.caption,
         ...m,
       }));
       sentMediaGroups.push({ ...payload, media: results, results });
@@ -253,16 +256,20 @@ describe('Regression Repair Sequence Suite', () => {
       },
     } as any);
 
-    // Verify new media message was sent containing the added photo, full caption, and keyboard
+    // Verify new media message was sent containing both photos and full caption
+    const primaryAlbumMsg = sentMessages.filter((m) => m.photo === 'original_invoice_photo_id').pop()!;
     const addedMediaMsg = sentMessages.find((m) => m.photo === 'addition_invoice_photo_id');
+    assert.ok(primaryAlbumMsg, 'Primary album message must be sent with original photo');
     assert.ok(addedMediaMsg, 'New media message must be sent with added photo');
 
-    // Verify keyboard is attached to the new media message
-    assert.ok(addedMediaMsg.reply_markup?.inline_keyboard?.length > 0);
-    assert.equal(addedMediaMsg.reply_markup.inline_keyboard[0][0].text, 'Copy Account Number');
+    // Verify companion button message exists
+    const buttonMsg = sentMessages.find(
+      (m) => m.reply_markup?.inline_keyboard?.[0]?.[0]?.text === 'Copy Account Number'
+    );
+    assert.ok(buttonMsg, 'Copy Account Number button must be present');
 
     // Verify caption format on the new media message
-    const combinedCaption = addedMediaMsg.caption;
+    const combinedCaption = primaryAlbumMsg.caption;
     assert.match(combinedCaption, /🧾 INVOICE • #INV0001/);
     assert.match(combinedCaption, /📥 Original Registration:/);
     assert.match(combinedCaption, /💵 Registered Amount:\n└─> 💰 ₩340,000/);
@@ -283,7 +290,7 @@ describe('Regression Repair Sequence Suite', () => {
     assert.ok(origEdited, 'Original invoice message must have update notice');
     assert.match(
       origEdited.caption,
-      /⚠️ Invoice #INV0001 was updated with additional media: <a href=".*?">View updated invoice<\/a>\. The original invoice media remains unchanged\./
+      /⚠️ Invoice #INV0001 was updated\. View the updated invoice: <a href=".*?">View updated invoice<\/a>\. The original invoice media remains unchanged\. Please delete this original message manually if no longer needed\./
     );
     assert.deepEqual(origEdited.reply_markup?.inline_keyboard, [], 'Keyboard must be removed from original message');
 
@@ -302,7 +309,7 @@ describe('Regression Repair Sequence Suite', () => {
     // Verify database state: total is ₩540,000, active message is the new media message, original media remains intact
     const txAfterAdd = (await txRepo.findById(tx1.id))!;
     assert.equal(txAfterAdd.amount, 540000);
-    assert.equal(txAfterAdd.metadata_message_id, addedMediaMsg.message_id);
+    assert.equal(txAfterAdd.metadata_message_id, primaryAlbumMsg.message_id);
     assert.equal(txAfterAdd.media_file_id, 'original_invoice_photo_id', 'Original media must be preserved');
     assert.equal(txAfterAdd.media_type, 'photo');
 
@@ -352,7 +359,7 @@ describe('Regression Repair Sequence Suite', () => {
     assert.match(payments[0].receipt_url, /https:\/\/t\.me\/c\/4463761895\/\d+/);
 
     // Verify active invoice message caption was edited in place
-    const editsForPrimary = editedCaptions.filter((e) => e.message_id === addedMediaMsg.message_id);
+    const editsForPrimary = editedCaptions.filter((e) => e.message_id === primaryAlbumMsg.message_id);
     const latestEdit = editsForPrimary[editsForPrimary.length - 1];
     assert.ok(latestEdit);
 
@@ -469,15 +476,20 @@ describe('Regression Repair Sequence Suite', () => {
     assert.ok(edit, 'Original document message must have update notice');
     assert.match(
       edit.caption,
-      /⚠️ Invoice #INV0001 was updated with additional media: <a href=".*?">View updated invoice<\/a>\. The original invoice media remains unchanged\./
+      /⚠️ Invoice #INV0001 was updated\. View the updated invoice: <a href=".*?">View updated invoice<\/a>\. The original invoice media remains unchanged\. Please delete this original message manually if no longer needed\./
     );
 
-    const newDocMsg = sentMessages.find((m) => m.document === 'addition_pdf_file_id');
-    assert.ok(newDocMsg, 'New document message must be sent with added media');
-    assert.match(newDocMsg.caption, /💰 Invoice Total: ₩650,000/);
-    assert.match(newDocMsg.caption, /⚖️ Need to Pay: ₩650,000/);
-    assert.ok(newDocMsg.reply_markup?.inline_keyboard?.length > 0);
-    assert.equal(newDocMsg.reply_markup.inline_keyboard[0][0].text, 'Copy Account Number');
+    const primaryDoc = sentMessages.filter((m) => m.document === 'invoice_pdf_file_id').pop()!;
+    const addedDoc = sentMessages.find((m) => m.document === 'addition_pdf_file_id');
+    assert.ok(primaryDoc, 'Primary document in group must have caption');
+    assert.ok(addedDoc, 'Added document in group must be present');
+    assert.match(primaryDoc.caption, /💰 Invoice Total: ₩650,000/);
+    assert.match(primaryDoc.caption, /⚖️ Need to Pay: ₩650,000/);
+
+    const buttonMsg = sentMessages.find(
+      (m) => m.reply_markup?.inline_keyboard?.[0]?.[0]?.text === 'Copy Account Number'
+    );
+    assert.ok(buttonMsg, 'Copy Account Number button message must be sent');
 
     const tx = (await txService.findByAnyMessageId(
       String(testConfig.telegramGroupId),
