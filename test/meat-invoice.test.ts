@@ -351,7 +351,7 @@ describe('Plain-Text Meat Invoice Calculator', () => {
       assert.equal(tx.amount, 1431216);
 
       // Verify bot sent the formatted invoice display with copy button
-      assert.equal(sentMessages.length, 1);
+      assert.equal(sentMessages.length, 2);
       assert.match(sentMessages[0].text, /MEAT INVOICE/);
       assert.match(sentMessages[0].text, /₩1,431,216/);
       assert.match(sentMessages[0].text, /Baraka Go'sht/);
@@ -428,7 +428,7 @@ describe('Plain-Text Meat Invoice Calculator', () => {
       assert.ok(tx);
       assert.equal(tx.distributor_id, distributor.id);
       assert.equal(tx.amount, 280700);
-      assert.equal(sentMessages.length, 1);
+      assert.equal(sentMessages.length, 2);
       assert.match(sentMessages[0].text, /₩280,700/);
     });
 
@@ -454,12 +454,12 @@ describe('Plain-Text Meat Invoice Calculator', () => {
 
       // First delivery
       await bot.handleUpdate(update as any);
-      assert.equal(sentMessages.length, 1);
+      assert.equal(sentMessages.length, 2);
 
       // Telegram retry of the same update
       await bot.handleUpdate(update as any);
       // Ensure no second message was sent and no duplicate row was created
-      assert.equal(sentMessages.length, 1);
+      assert.equal(sentMessages.length, 2);
 
       const rows = await txRepo.findByMessageId(String(testConfig.telegramGroupId), 301);
       assert.ok(rows);
@@ -604,7 +604,7 @@ describe('Plain-Text Meat Invoice Calculator', () => {
       assert.equal(tx.status, 'PENDING');
       assert.equal(tx.distributor_id, dist.id);
       assert.equal(tx.amount, 125000);
-      assert.equal(sentMessages.length, 1);
+      assert.equal(sentMessages.length, 2);
       assert.match(sentMessages[0].text, /Ikhlas Market/);
       assert.match(sentMessages[0].text, /₩125,000/);
     });

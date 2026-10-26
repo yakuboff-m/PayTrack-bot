@@ -586,11 +586,11 @@ describe('Critical Transaction Workflow Audit & Repair Regression Suite', () => 
     assert.match(newPhotoMsg.caption, /Amount Added:\n└─> 💰 ₩50,000/);
     assert.match(newPhotoMsg.caption, /Need to Pay: ₩150,000/);
 
-    // Assert no separate account details message was sent
+    // Assert replacement account control message was sent
     const accountDetailsMsgs = sentMessages.filter(
       (m) => typeof m.text === 'string' && m.text.includes('Account details for')
     );
-    assert.equal(accountDetailsMsgs.length, 0, 'Must NOT send separate account details message');
+    assert.equal(accountDetailsMsgs.length, 1, 'Must have replacement account-control message');
 
     // Admin /add message was deleted
     assert.ok(deletedMessageIds.includes(208), 'Admin /add message must be deleted');

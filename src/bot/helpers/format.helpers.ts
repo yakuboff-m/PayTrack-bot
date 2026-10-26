@@ -408,9 +408,9 @@ export function buildUnifiedInvoiceCaption(params: BuildUnifiedInvoiceCaptionPar
 
   if (params.distributor) {
     headerLines.push(`🏢 ${params.distributor.name}`);
-    const bankDetails = [params.distributor.bankName, params.distributor.accountNumber].filter(Boolean).join(' ');
-    if (bankDetails) {
-      headerLines.push(`💳 ${bankDetails}`);
+    const hasBank = Boolean(params.distributor.bankName || params.distributor.accountNumber);
+    if (hasBank) {
+      headerLines.push('💳 Bank/account details are shown only in the separate account-control message.');
     }
     if (params.distributor.accountHolder) {
       headerLines.push(`👤 ${params.distributor.accountHolder}`);
@@ -638,7 +638,36 @@ export function formatSupersededInvoiceCaption(
   updatedInvoiceUrl: string
 ): string {
   const invStr = formatInvoiceId(invoiceId);
-  return `⚠️ Invoice ${invStr} was updated. View the updated invoice: <a href="${updatedInvoiceUrl}">View updated invoice</a>. The original invoice media remains unchanged. Please delete this original message manually if no longer needed.`;
+  return `⚠️ Invoice ${invStr} was updated.\n\n🔗 Updated invoice: <a href="${updatedInvoiceUrl}">View updated invoice</a>\n\n🗑 Please delete this original message manually if no longer needed.`;
+}
+
+export function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+/**
+ * Formats the separate account-control message in the Pending topic.
+ * Contains only the bank details and no duplicate invoice caption.
+ */
+export function formatAccountControlMessage(
+  invoiceId: number,
+  distributor: DistributorSnapshot
+): string {
+  const invStr = formatInvoiceId(invoiceId);
+  const lines: string[] = [`💳 <b>Account details for ${invStr}:</b>`];
+  if (distributor.bankName) {
+    lines.push(`🏦 Bank: <b>${escapeHtml(distributor.bankName)}</b>`);
+  }
+  if (distributor.accountNumber) {
+    lines.push(`🔢 Account: <code>${escapeHtml(distributor.accountNumber)}</code>`);
+  }
+  if (distributor.accountHolder) {
+    lines.push(`👤 Holder: <b>${escapeHtml(distributor.accountHolder)}</b>`);
+  }
+  return lines.join('\n');
 }
 
 /**

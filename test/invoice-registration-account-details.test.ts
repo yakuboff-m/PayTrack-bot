@@ -161,8 +161,8 @@ async function setupTestContext() {
   };
 }
 
-describe('Regression: Integrated Account Details in Invoice Caption & Keyboard', () => {
-  it('1. New invoice registration creates exactly one invoice media message with integrated caption and account button, and NO separate account-details message', async () => {
+describe('Invoice Workflow: Primary Message & Account-Control Message Lifecycle', () => {
+  it('1. New invoice registration creates primary invoice message and exactly one account-control message', async () => {
     const ctx = await setupTestContext();
 
     // User sends photo invoice
@@ -197,16 +197,17 @@ describe('Regression: Integrated Account Details in Invoice Caption & Keyboard',
       },
     } as any);
 
-    // Assert: Exactly ONE bot message created for the invoice
+    // Assert: Exactly ONE invoice media message created for the invoice
     const invoiceMediaMessages = ctx.sentMessages.filter((m) => m.photo === 'photo_initial_inv0020');
     assert.equal(invoiceMediaMessages.length, 1, 'Must create exactly one invoice media message');
 
     const invoiceMsg = invoiceMediaMessages[0];
 
-    // Assert: Caption integrates distributor, bank, account number, account holder, action history, and financial summary
+    // Assert: Primary caption has approved structure, bank note, NO raw bank details
     assert.match(invoiceMsg.caption, /🧾 INVOICE • #INV0001/);
     assert.match(invoiceMsg.caption, /🏢 Koreta Meat Co/);
-    assert.match(invoiceMsg.caption, /💳 Hana Bank 012-345678-2341/);
+    assert.match(invoiceMsg.caption, /💳 Bank\/account details are shown only in the separate account-control message\./);
+    assert.doesNotMatch(invoiceMsg.caption, /012-345678-2341/, 'Bank account number must NOT appear in primary caption');
     assert.match(invoiceMsg.caption, /👤 Koreta CoLtd/);
     assert.match(invoiceMsg.caption, /📜 ACTION HISTORY/);
     assert.match(invoiceMsg.caption, /📥 Original Registration:/);
@@ -217,33 +218,27 @@ describe('Regression: Integrated Account Details in Invoice Caption & Keyboard',
     assert.match(invoiceMsg.caption, /⚖️ Need to Pay: ₩350,000/);
     assert.match(invoiceMsg.caption, /📊 Status: ⏳ PENDING/);
 
-    // Assert: Copy Account Number button is attached directly to the invoice media message
-    assert.ok(invoiceMsg.reply_markup?.inline_keyboard, 'Inline keyboard must exist on invoice message');
-    assert.equal(
-      invoiceMsg.reply_markup.inline_keyboard[0][0].text,
-      'Copy Account Number',
-      'Button must be attached directly to invoice media message'
-    );
-    assert.equal(
-      invoiceMsg.reply_markup.inline_keyboard[0][0].copy_text?.text,
-      '012-345678-2341'
-    );
+    // Primary message has NO inline keyboard
+    assert.equal(invoiceMsg.reply_markup, undefined, 'Primary media message must not have inline keyboard');
 
-    // Assert: NO separate "Account details for #INVxxxx" message was sent
-    const separateAccountMessages = ctx.sentMessages.filter(
-      (m) => typeof m.text === 'string' && m.text.includes('Account details for')
+    // Assert: Exactly ONE separate account-control message was sent
+    const controlMsgs = ctx.sentMessages.filter(
+      (m) => m.reply_markup?.inline_keyboard?.[0]?.[0]?.text === 'Copy Account Number'
     );
-    assert.equal(
-      separateAccountMessages.length,
-      0,
-      'Must NOT send a separate Account details for message'
-    );
+    assert.equal(controlMsgs.length, 1, 'Must send exactly one account-control message');
 
-    // Total sent messages to chat: exactly 1 (the invoice itself)
-    assert.equal(ctx.sentMessages.length, 1, 'Total bot messages sent must be exactly 1');
+    const controlMsg = controlMsgs[0];
+    assert.match(controlMsg.text, /Account details for #INV0001/);
+    assert.match(controlMsg.text, /Hana Bank/);
+    assert.match(controlMsg.text, /012-345678-2341/);
+    assert.match(controlMsg.text, /Koreta CoLtd/);
+    assert.equal(controlMsg.reply_markup.inline_keyboard[0][0].copy_text?.text, '012-345678-2341');
+
+    // Total sent messages to chat: exactly 2 (primary invoice + account-control message)
+    assert.equal(ctx.sentMessages.length, 2, 'Total bot messages sent must be exactly 2');
   });
 
-  it('2. /add preserves original invoice media, updates invoice in place with account button, and sends NO separate account message', async () => {
+  it('2. /add with media preserves original media, updates superseded notice on old primary, replaces account-control message', async () => {
     const ctx = await setupTestContext();
 
     // Register invoice
@@ -259,6 +254,18 @@ describe('Regression: Integrated Account Details in Invoice Caption & Keyboard',
     await ctx.txService.assignDistributor(tx.id, ctx.distributor.id, snapshot);
     await ctx.txService.setAmount(tx.id, 300000);
     await ctx.txRepo.updateMetadataMessageId(tx.id, 200);
+
+    // Initial account-control message
+    const initialControlMsg = {
+      message_id: 250,
+      chat_id: testConfig.telegramGroupId,
+      text: '💳 Account details for #INV0001:',
+      reply_markup: {
+        inline_keyboard: [[{ text: 'Copy Account Number', copy_text: { text: '012-345678-2341' } }]],
+      },
+    };
+    ctx.sentMessages.push(initialControlMsg);
+    await ctx.txRepo.updateAccountControlMessageId(tx.id, 250);
 
     // Issue /add 150000 with a second photo
     await ctx.bot.handleUpdate({
@@ -298,26 +305,23 @@ describe('Regression: Integrated Account Details in Invoice Caption & Keyboard',
     assert.match(albumCaption, /💰 Invoice Total: ₩450,000/);
     assert.match(albumCaption, /⚖️ Need to Pay: ₩450,000/);
 
-    // Copy Account Number button is attached to companion message
-    const buttonMsg = ctx.sentMessages.find(
+    // Replacement account-control message exists
+    const controlMsgs = ctx.sentMessages.filter(
       (m) => m.reply_markup?.inline_keyboard?.[0]?.[0]?.text === 'Copy Account Number'
     );
-    assert.ok(buttonMsg, 'Button message must be sent with Copy Account Number');
+    assert.equal(controlMsgs.length, 2, 'Must have initial + replacement account-control messages');
+
+    // Old account-control message was deleted
+    assert.ok(ctx.deletedMessageIds.includes(250), 'Old account-control message must be deleted');
 
     // Assert: Original invoice message 200 was updated with clear notice and direct link
     const origEdited = ctx.editedCaptions.find((e) => e.message_id === 200);
     assert.ok(origEdited, 'Original invoice message 200 must have update notice');
     assert.match(
       origEdited.caption,
-      /⚠️ Invoice #INV0001 was updated\. View the updated invoice: <a href=".*?">View updated invoice<\/a>\. The original invoice media remains unchanged\. Please delete this original message manually if no longer needed\./
+      /⚠️ Invoice #INV0001 was updated\.\n\n🔗 Updated invoice: <a href=".*?">View updated invoice<\/a>\n\n🗑 Please delete this original message manually if no longer needed\./
     );
     assert.deepEqual(origEdited.reply_markup?.inline_keyboard, [], 'Keyboard must be removed from original message');
-
-    // Assert: NO generic companion message was sent
-    const genericCompanionMsgs = ctx.sentMessages.filter(
-      (m) => typeof m.caption === 'string' && m.caption.includes('Additional invoice media for')
-    );
-    assert.equal(genericCompanionMsgs.length, 0, 'Must NOT send generic companion caption');
 
     // Assert: Original media identity is preserved in DB
     const updatedTx = (await ctx.txRepo.findById(tx.id))!;
@@ -330,7 +334,7 @@ describe('Regression: Integrated Account Details in Invoice Caption & Keyboard',
     assert.ok(ctx.deletedMessageIds.includes(201));
   });
 
-  it('3. /note preserves invoice history, totals, and attached Copy Account Number button', async () => {
+  it('3. /note preserves invoice history, totals, and does not send extra messages', async () => {
     const ctx = await setupTestContext();
 
     const tx = await ctx.txService.registerTransaction(
@@ -345,6 +349,9 @@ describe('Regression: Integrated Account Details in Invoice Caption & Keyboard',
     await ctx.txService.assignDistributor(tx.id, ctx.distributor.id, snapshot);
     await ctx.txService.setAmount(tx.id, 250000);
     await ctx.txRepo.updateMetadataMessageId(tx.id, 300);
+    await ctx.txRepo.updateAccountControlMessageId(tx.id, 350);
+
+    const initialSentCount = ctx.sentMessages.length;
 
     // Issue /note
     await ctx.bot.handleUpdate({
@@ -371,20 +378,11 @@ describe('Regression: Integrated Account Details in Invoice Caption & Keyboard',
     assert.match(edited.caption, /📝 Note: Delivery by 2 PM/);
     assert.match(edited.caption, /💰 Invoice Total: ₩250,000/);
 
-    // Button remains attached
-    assert.equal(
-      edited.reply_markup?.inline_keyboard?.[0]?.[0]?.text,
-      'Copy Account Number'
-    );
-
-    // No separate account details message
-    const separateAccountMessages = ctx.sentMessages.filter(
-      (m) => typeof m.text === 'string' && m.text.includes('Account details for')
-    );
-    assert.equal(separateAccountMessages.length, 0);
+    // No new messages sent
+    assert.equal(ctx.sentMessages.length, initialSentCount, 'No new messages must be created for /note');
   });
 
-  it('4. Partial payment preserves invoice history, updates balance due, keeps button, and sends visible text in Confirmed', async () => {
+  it('4. Partial payment preserves invoice history, updates balance due, and sends visible text in Confirmed', async () => {
     const ctx = await setupTestContext();
 
     const tx = await ctx.txService.registerTransaction(
@@ -399,6 +397,7 @@ describe('Regression: Integrated Account Details in Invoice Caption & Keyboard',
     await ctx.txService.assignDistributor(tx.id, ctx.distributor.id, snapshot);
     await ctx.txService.setAmount(tx.id, 500000);
     await ctx.txRepo.updateMetadataMessageId(tx.id, 400);
+    await ctx.txRepo.updateAccountControlMessageId(tx.id, 450);
 
     // User replies with receipt photo and /paid 200000
     await ctx.bot.handleUpdate({
@@ -427,12 +426,6 @@ describe('Regression: Integrated Account Details in Invoice Caption & Keyboard',
     assert.match(editedPending.caption, /⚖️ Need to Pay: ₩300,000/);
     assert.match(editedPending.caption, /📊 Status: ⏳ PARTIALLY PAID/);
 
-    // Copy Account Number button remains attached to Pending invoice
-    assert.equal(
-      editedPending.reply_markup?.inline_keyboard?.[0]?.[0]?.text,
-      'Copy Account Number'
-    );
-
     // Assert: In Confirmed topic, payment summary is an ordinary visible text message
     const confirmedTextMsg = ctx.sentMessages.find(
       (m) =>
@@ -450,14 +443,11 @@ describe('Regression: Integrated Account Details in Invoice Caption & Keyboard',
     );
     assert.ok(copiedReceipt, 'Receipt media must be copied separately into Confirmed');
 
-    // No separate account details message
-    const separateAccountMessages = ctx.sentMessages.filter(
-      (m) => typeof m.text === 'string' && m.text.includes('Account details for')
-    );
-    assert.equal(separateAccountMessages.length, 0);
+    // Account control message is NOT deleted during partial payment
+    assert.equal(ctx.deletedMessageIds.includes(450), false, 'Account-control message must not be deleted on partial payment');
   });
 
-  it('5. Full payment confirms invoice: ordinary visible text summary in Confirmed, media copied separately', async () => {
+  it('5. Full payment confirms invoice: ordinary visible text summary in Confirmed, media copied separately, cleans up account-control message', async () => {
     const ctx = await setupTestContext();
 
     const tx = await ctx.txService.registerTransaction(
@@ -472,6 +462,7 @@ describe('Regression: Integrated Account Details in Invoice Caption & Keyboard',
     await ctx.txService.assignDistributor(tx.id, ctx.distributor.id, snapshot);
     await ctx.txService.setAmount(tx.id, 300000);
     await ctx.txRepo.updateMetadataMessageId(tx.id, 500);
+    await ctx.txRepo.updateAccountControlMessageId(tx.id, 550);
 
     // Full payment: /paid with receipt photo
     await ctx.bot.handleUpdate({
@@ -515,14 +506,12 @@ describe('Regression: Integrated Account Details in Invoice Caption & Keyboard',
     const txFinal = (await ctx.txRepo.findById(tx.id))!;
     assert.equal(txFinal.status, 'PAID');
 
-    // No separate account details message
-    const separateAccountMessages = ctx.sentMessages.filter(
-      (m) => typeof m.text === 'string' && m.text.includes('Account details for')
-    );
-    assert.equal(separateAccountMessages.length, 0);
+    // Account-control message must be cleaned up (deleted) upon full payment
+    assert.ok(ctx.deletedMessageIds.includes(550), 'Account control message 550 must be deleted upon full payment');
+    assert.equal(txFinal.account_control_message_id, null);
   });
 
-  it('6. Full sequence: Register invoice → /add with new media → /note → partial payment → full payment', async () => {
+  it('6. Full sequence: Register invoice → /add with new media → /add second media → /note → partial payment → full payment', async () => {
     const ctx = await setupTestContext();
 
     // ----------------------------------------------------
@@ -566,7 +555,12 @@ describe('Regression: Integrated Account Details in Invoice Caption & Keyboard',
     assert.match(origInvoiceMsg.caption, /🧾 INVOICE • #INV0001/);
     assert.match(origInvoiceMsg.caption, /💰 Invoice Total: ₩300,000/);
     assert.match(origInvoiceMsg.caption, /⚖️ Need to Pay: ₩300,000/);
-    assert.equal(origInvoiceMsg.reply_markup?.inline_keyboard?.[0]?.[0]?.text, 'Copy Account Number');
+
+    // Account control message exists with button
+    const controlMsg1 = ctx.sentMessages.find(
+      (m) => m.reply_markup?.inline_keyboard?.[0]?.[0]?.text === 'Copy Account Number'
+    );
+    assert.ok(controlMsg1, 'Account control message must exist');
 
     // Verify DB
     let tx = (await ctx.txRepo.findById(1))!;
@@ -574,6 +568,7 @@ describe('Regression: Integrated Account Details in Invoice Caption & Keyboard',
     assert.equal(tx.media_file_id, 'seq_original_photo');
     assert.equal(tx.amount, 300000);
     assert.equal(tx.metadata_message_id, origInvoiceMsgId);
+    assert.equal(tx.account_control_message_id, controlMsg1.message_id);
 
     // ----------------------------------------------------
     // Step 2: /add 100000 with new invoice media
@@ -615,18 +610,15 @@ describe('Regression: Integrated Account Details in Invoice Caption & Keyboard',
     assert.match(origInAlbum.caption, /💰 Invoice Total: ₩400,000/);
     assert.match(origInAlbum.caption, /⚖️ Need to Pay: ₩400,000/);
 
-    // Companion button message exists
-    const buttonMsg1 = ctx.sentMessages.find(
-      (m) => m.reply_markup?.inline_keyboard?.[0]?.[0]?.text === 'Copy Account Number'
-    );
-    assert.ok(buttonMsg1, 'Copy Account Number button must be present');
+    // Old account control message was deleted
+    assert.ok(ctx.deletedMessageIds.includes(controlMsg1.message_id), 'Old control message must be deleted');
 
     // Assert: Original message was edited with notice & link, and keyboard was removed
     const origEdited = ctx.editedCaptions.find((e) => e.message_id === origInvoiceMsgId);
     assert.ok(origEdited, 'Original invoice message must have notice edited');
     assert.match(
       origEdited.caption,
-      /⚠️ Invoice #INV0001 was updated\. View the updated invoice: <a href=".*?">View updated invoice<\/a>\. The original invoice media remains unchanged\. Please delete this original message manually if no longer needed\./
+      /⚠️ Invoice #INV0001 was updated\.\n\n🔗 Updated invoice: <a href=".*?">View updated invoice<\/a>\n\n🗑 Please delete this original message manually if no longer needed\./
     );
     assert.deepEqual(origEdited.reply_markup?.inline_keyboard, [], 'Keyboard must be cleared from original message');
 
@@ -799,11 +791,7 @@ describe('Regression: Integrated Account Details in Invoice Caption & Keyboard',
     assert.equal(totalPaid, 450000);
     assert.equal(tx.media_file_id, 'seq_original_photo', 'Original media identity remains permanently untouched');
 
-    // Ensure no orphan or separate account messages ever created
-    const totalSeparateAccount = ctx.sentMessages.filter(
-      (m) => typeof m.text === 'string' && m.text.includes('Account details for')
-    );
-    assert.equal(totalSeparateAccount.length, 0);
+    // Account control message is cleaned up upon full payment
+    assert.equal(tx.account_control_message_id, null, 'Account-control message id must be null in DB after full payment');
   });
 });
-

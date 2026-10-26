@@ -183,8 +183,8 @@ describe('Invoice Caption, Amount Breakdown, and Append-Only Action History', ()
 
     // Section A: Header
     assert.match(caption, /🧾 INVOICE • #INV0001/);
-    assert.match(caption, /🏢 Meat Wholesaler Co/);
-    assert.match(caption, /💳 Shinhan Bank 110-123-456789/);
+    assert.match(caption, /💳 Bank\/account details are shown only in the separate account-control message\./);
+    assert.doesNotMatch(caption, /110-123-456789/);
 
     // Section B: Action History
     assert.match(caption, /📜 ACTION HISTORY/);

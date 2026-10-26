@@ -24,6 +24,7 @@ import {
   formatInvoiceId,
   formatCleanedPendingInvoiceCaption,
   formatSupersededInvoiceCaption,
+  formatAccountControlMessage,
   formatReceiptCaption,
   parsePaidCommandPayload,
   formatAmount,
@@ -109,6 +110,13 @@ export class TransactionService {
       confirmationUrl: row.confirmation_url,
       historyMessageId: row.history_message_id,
       metadataMessageId: row.metadata_message_id,
+      accountControlMessageId: row.account_control_message_id ?? null,
+      historicalControlMessageIds: row.historical_control_message_ids
+        ? JSON.parse(row.historical_control_message_ids)
+        : [],
+      supersededMessageIds: row.superseded_message_ids
+        ? JSON.parse(row.superseded_message_ids)
+        : [],
       notes: row.notes ? JSON.parse(row.notes) : [],
       mediaFileId: row.media_file_id ?? null,
       mediaType: row.media_type ?? null,
@@ -349,13 +357,10 @@ export class TransactionService {
     if (transaction.metadataMessageId) {
       try {
         if (msgType === 'text') {
-          await api.editMessageText(chatId, transaction.metadataMessageId, safeCaption, {
-            reply_markup: keyboard,
-          });
+          await api.editMessageText(chatId, transaction.metadataMessageId, safeCaption);
         } else {
           await api.editMessageCaption(chatId, transaction.metadataMessageId, {
             caption: safeCaption,
-            reply_markup: keyboard,
           });
         }
         return { botMessageId: transaction.metadataMessageId };
@@ -376,7 +381,6 @@ export class TransactionService {
           botMsg = await api.sendPhoto(chatId, fileId, {
             caption: safeCaption,
             message_thread_id: topicId,
-            reply_markup: keyboard,
           });
           break;
         }
@@ -385,7 +389,6 @@ export class TransactionService {
           botMsg = await api.sendDocument(chatId, fileId, {
             caption: safeCaption,
             message_thread_id: topicId,
-            reply_markup: keyboard,
           });
           break;
         }
@@ -393,7 +396,6 @@ export class TransactionService {
         default: {
           botMsg = await api.sendMessage(chatId, safeCaption, {
             message_thread_id: topicId,
-            reply_markup: keyboard,
           });
           break;
         }
@@ -413,6 +415,23 @@ export class TransactionService {
     // Persist the bot message ID
     await this.repo.updateMetadataMessageId(transaction.id, botMsg.message_id);
     transaction.metadataMessageId = botMsg.message_id;
+
+    // Send exactly one separate account-control message if distributor has account details
+    const dist = distributor || transaction.distributorSnapshot;
+    if (dist?.accountNumber && !transaction.accountControlMessageId) {
+      try {
+        const controlText = formatAccountControlMessage(transaction.id, dist);
+        const controlMsg = await api.sendMessage(chatId, controlText, {
+          message_thread_id: topicId,
+          reply_markup: copyAccountKeyboard(dist.accountNumber),
+          parse_mode: 'HTML',
+        });
+        await this.repo.updateAccountControlMessageId(transaction.id, controlMsg.message_id);
+        transaction.accountControlMessageId = controlMsg.message_id;
+      } catch (btnErr) {
+        console.warn('Failed to send account control message:', (btnErr as Error).message);
+      }
+    }
 
     // Persist media file id and media type if not already stored
     let savedFileId: string | null = null;
@@ -1016,13 +1035,32 @@ export class TransactionService {
                 /* best effort */
               }
             }
+
+            // Clean up disposable account-control messages from Pending
+            if (transaction.accountControlMessageId) {
+              try {
+                await api.deleteMessage(chatId, transaction.accountControlMessageId);
+                await this.repo.updateAccountControlMessageId(transaction.id, null);
+                transaction.accountControlMessageId = null;
+              } catch (delErr: unknown) {
+                console.warn(
+                  `Failed to delete account control message ${transaction.accountControlMessageId}:`,
+                  (delErr as Error).message
+                );
+              }
+            }
+            if (transaction.historicalControlMessageIds && transaction.historicalControlMessageIds.length > 0) {
+              for (const histId of transaction.historicalControlMessageIds) {
+                try {
+                  await api.deleteMessage(chatId, histId);
+                } catch {
+                  /* ignore */
+                }
+              }
+            }
           } else {
             // PARTIAL PAYMENT:
             // Update display to reflect partial payment and remaining balance
-            const keyboard = transaction.distributorSnapshot?.accountNumber
-              ? copyAccountKeyboard(transaction.distributorSnapshot.accountNumber)
-              : undefined;
-
             const currentCaption = invoiceMsg.text ?? invoiceMsg.caption ?? '';
             const newContent = await this.renderInvoiceCaptionForTransaction(
               transaction.id,
@@ -1034,7 +1072,6 @@ export class TransactionService {
               try {
                 await api.editMessageCaption(chatId, invoiceMessageId, {
                   caption: newContent,
-                  reply_markup: keyboard,
                 });
               } catch (editErr: unknown) {
                 console.warn(
@@ -1047,10 +1084,7 @@ export class TransactionService {
                 await api.editMessageText(
                   chatId,
                   invoiceMessageId,
-                  newContent,
-                  {
-                    reply_markup: keyboard,
-                  }
+                  newContent
                 );
               } catch (textErr: unknown) {
                 console.warn(
@@ -1365,42 +1399,53 @@ export class TransactionService {
             });
             newInvoiceMsg = sentMsgs[0];
 
-            // If distributor account details exist, send companion copy button message
-            if (keyboard && transaction.distributorSnapshot?.accountNumber) {
-              try {
-                const distName = transaction.distributorSnapshot.name || 'Account details';
-                const bankName = transaction.distributorSnapshot.bankName || '';
-                const accNum = transaction.distributorSnapshot.accountNumber;
-                const companionText = `💳 <b>${distName}</b> • ${bankName} <code>${accNum}</code>`;
-                await api.sendMessage(chatId, companionText, {
-                  message_thread_id: pendingTopicId,
-                  reply_markup: keyboard,
-                  parse_mode: 'HTML',
-                });
-              } catch (btnErr) {
-                console.warn('Failed to send companion keyboard message:', (btnErr as Error).message);
-              }
+            for (const other of sentMsgs.slice(1)) {
+              await this.repo.addSupersededMessageId(transaction.id, other.message_id);
             }
           } else if (addPhoto) {
             newInvoiceMsg = await api.sendPhoto(chatId, addPhoto, {
               caption: safeCaption,
               message_thread_id: pendingTopicId,
-              reply_markup: keyboard,
               parse_mode: 'HTML',
             });
           } else if (addDoc) {
             newInvoiceMsg = await api.sendDocument(chatId, addDoc, {
               caption: safeCaption,
               message_thread_id: pendingTopicId,
-              reply_markup: keyboard,
               parse_mode: 'HTML',
             });
           } else {
             newInvoiceMsg = await api.sendMessage(chatId, safeCaption, {
               message_thread_id: pendingTopicId,
-              reply_markup: keyboard,
               parse_mode: 'HTML',
             });
+          }
+
+          // Ensure exactly one current account-control message for the current invoice version
+          if (transaction.distributorSnapshot?.accountNumber) {
+            try {
+              const controlText = formatAccountControlMessage(
+                transaction.id,
+                transaction.distributorSnapshot
+              );
+              const newControlMsg = await api.sendMessage(chatId, controlText, {
+                message_thread_id: pendingTopicId,
+                reply_markup: copyAccountKeyboard(transaction.distributorSnapshot.accountNumber),
+                parse_mode: 'HTML',
+              });
+              const oldControlId = transaction.accountControlMessageId;
+              await this.repo.updateAccountControlMessageId(transaction.id, newControlMsg.message_id);
+              transaction.accountControlMessageId = newControlMsg.message_id;
+              if (oldControlId && oldControlId !== newControlMsg.message_id) {
+                try {
+                  await api.deleteMessage(chatId, oldControlId);
+                } catch (delErr) {
+                  console.warn(`Failed to delete previous control message ${oldControlId}:`, (delErr as Error).message);
+                }
+              }
+            } catch (btnErr) {
+              console.warn('Failed to send account control message:', (btnErr as Error).message);
+            }
           }
         } catch (sendErr) {
           return {
@@ -1448,6 +1493,8 @@ export class TransactionService {
           console.warn(`Failed to update original invoice notice ${targetMessageId}:`, (err as Error).message);
         }
 
+        await this.repo.addSupersededMessageId(transaction.id, targetMessageId);
+
         if (transaction.originalMessageId && transaction.originalMessageId !== targetMessageId) {
           try {
             await api.editMessageCaption(chatId, transaction.originalMessageId, {
@@ -1458,6 +1505,7 @@ export class TransactionService {
           } catch {
             /* best effort */
           }
+          await this.repo.addSupersededMessageId(transaction.id, transaction.originalMessageId);
         }
 
         // 3. Persist new primary message ID in DB (so subsequent operations target this active invoice), preserving superseded message in history
@@ -1478,15 +1526,12 @@ export class TransactionService {
           try {
             await api.editMessageCaption(chatId, targetMessageId, {
               caption: safeCaption,
-              reply_markup: keyboard,
             });
             editSucceeded = true;
           } catch (capErr: unknown) {
             if (isNoTextMessageError(capErr)) {
               try {
-                await api.editMessageText(chatId, targetMessageId, safeCaption, {
-                  reply_markup: keyboard,
-                });
+                await api.editMessageText(chatId, targetMessageId, safeCaption);
                 editSucceeded = true;
               } catch {
                 /* fall through to re-send fallback */
@@ -1495,16 +1540,13 @@ export class TransactionService {
           }
         } else {
           try {
-            await api.editMessageText(chatId, targetMessageId, safeCaption, {
-              reply_markup: keyboard,
-            });
+            await api.editMessageText(chatId, targetMessageId, safeCaption);
             editSucceeded = true;
           } catch (txtErr: unknown) {
             if (isNoTextMessageError(txtErr)) {
               try {
                 await api.editMessageCaption(chatId, targetMessageId, {
                   caption: safeCaption,
-                  reply_markup: keyboard,
                 });
                 editSucceeded = true;
               } catch {
@@ -1520,26 +1562,23 @@ export class TransactionService {
             message_id: targetMessageId,
           } as Message;
         } else {
-          // Fallback: Re-send preserving the ORIGINAL media with keyboard attached
+          // Fallback: Re-send preserving the ORIGINAL media
           try {
             if (originalMediaType === 'photo' && originalMediaFileId) {
               newInvoiceMsg = await api.sendPhoto(chatId, originalMediaFileId, {
                 caption: safeCaption,
                 message_thread_id: pendingTopicId,
-                reply_markup: keyboard,
                 parse_mode: 'HTML',
               });
             } else if (originalMediaType === 'document' && originalMediaFileId) {
               newInvoiceMsg = await api.sendDocument(chatId, originalMediaFileId, {
                 caption: safeCaption,
                 message_thread_id: pendingTopicId,
-                reply_markup: keyboard,
                 parse_mode: 'HTML',
               });
             } else {
               newInvoiceMsg = await api.sendMessage(chatId, safeCaption, {
                 message_thread_id: pendingTopicId,
-                reply_markup: keyboard,
                 parse_mode: 'HTML',
               });
             }

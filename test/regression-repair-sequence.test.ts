@@ -223,7 +223,7 @@ describe('Regression Repair Sequence Suite', () => {
     // Verify caption and inline keyboard on primary message
     assert.match(registeredBotMsg.caption, /🧾 INVOICE • #INV0001/);
     assert.match(registeredBotMsg.caption, /🏢 Koreta/);
-    assert.match(registeredBotMsg.caption, /💳 Hana Bank 012-345678-2341/);
+    assert.match(registeredBotMsg.caption, /💳 Bank\/account details are shown only in the separate account-control message\./);
     assert.match(registeredBotMsg.caption, /👤 Koreta CoLtd/);
     assert.match(registeredBotMsg.caption, /📥 Original Registration:/);
     assert.match(registeredBotMsg.caption, /💵 Registered Amount:\n└─> 💰 ₩340,000/);
@@ -231,8 +231,14 @@ describe('Regression Repair Sequence Suite', () => {
     assert.match(registeredBotMsg.caption, /💵 Total Paid: ₩0/);
     assert.match(registeredBotMsg.caption, /⚖️ Need to Pay: ₩340,000/);
     assert.match(registeredBotMsg.caption, /📊 Status: ⏳ PENDING/);
-    assert.ok(registeredBotMsg.reply_markup?.inline_keyboard?.length > 0);
-    assert.equal(registeredBotMsg.reply_markup.inline_keyboard[0][0].text, 'Copy Account Number');
+
+    // Account-control message contains bank details and Copy Account Number button
+    const controlMsg = sentMessages.find(
+      (m) => m.reply_markup?.inline_keyboard?.[0]?.[0]?.text === 'Copy Account Number'
+    );
+    assert.ok(controlMsg, 'Account-control message must be present');
+    assert.match(controlMsg.text, /Hana Bank/);
+    assert.match(controlMsg.text, /012-345678-2341/);
 
     // ─────────────────────────────────────────────────────────────
     // Step 2: /add 200,000 while replying to the invoice with new media
@@ -290,15 +296,15 @@ describe('Regression Repair Sequence Suite', () => {
     assert.ok(origEdited, 'Original invoice message must have update notice');
     assert.match(
       origEdited.caption,
-      /⚠️ Invoice #INV0001 was updated\. View the updated invoice: <a href=".*?">View updated invoice<\/a>\. The original invoice media remains unchanged\. Please delete this original message manually if no longer needed\./
+      /⚠️ Invoice #INV0001 was updated\.\n\n🔗 Updated invoice: <a href=".*?">View updated invoice<\/a>\n\n🗑 Please delete this original message manually if no longer needed\./
     );
     assert.deepEqual(origEdited.reply_markup?.inline_keyboard, [], 'Keyboard must be removed from original message');
 
-    // Verify NO separate generic account details message was sent
-    const separateAccountMsgs = sentMessages.filter((m) =>
+    // Verify account control message exists for the new invoice version
+    const activeControlMsgs = sentMessages.filter((m) =>
       typeof m.text === 'string' && m.text.includes('Account details for')
     );
-    assert.equal(separateAccountMsgs.length, 0, 'Must NOT send separate account details message');
+    assert.equal(activeControlMsgs.length, 2, 'Must have account-control messages (step 1 + replacement in step 2)');
 
     // Verify NO generic companion notice message was sent
     const genericCompanionMsgs = sentMessages.filter((m) =>
@@ -385,9 +391,11 @@ describe('Regression Repair Sequence Suite', () => {
     assert.match(finalCaption, /⚖️ Need to Pay: ₩400,000/);
     assert.match(finalCaption, /📊 Status: ⏳ PARTIALLY PAID/);
 
-    // Verify keyboard remains attached
-    assert.ok(latestEdit.reply_markup?.inline_keyboard?.length > 0);
-    assert.equal(latestEdit.reply_markup.inline_keyboard[0][0].text, 'Copy Account Number');
+    // Verify account-control message remains present during partial payment
+    const controlMsgDuringPartial = sentMessages.find(
+      (m) => m.reply_markup?.inline_keyboard?.[0]?.[0]?.text === 'Copy Account Number'
+    );
+    assert.ok(controlMsgDuringPartial, 'Account-control message must remain present during partial payment');
 
     // ─────────────────────────────────────────────────────────────
     // Step 4: Full payment of remaining balance (₩400,000)
@@ -415,6 +423,9 @@ describe('Regression Repair Sequence Suite', () => {
     assert.equal(txFullyPaid.status, 'PAID');
     const finalTotalPaid = await txRepo.getTotalPaid(tx1.id);
     assert.equal(finalTotalPaid, 540000);
+
+    // Account-control message must be cleaned up (deleted) upon full payment
+    assert.equal(txFullyPaid.account_control_message_id, null);
 
     // Check confirmed topic received confirmation
     assert.ok(txFullyPaid.confirmation_message_id);
@@ -476,7 +487,7 @@ describe('Regression Repair Sequence Suite', () => {
     assert.ok(edit, 'Original document message must have update notice');
     assert.match(
       edit.caption,
-      /⚠️ Invoice #INV0001 was updated\. View the updated invoice: <a href=".*?">View updated invoice<\/a>\. The original invoice media remains unchanged\. Please delete this original message manually if no longer needed\./
+      /⚠️ Invoice #INV0001 was updated\.\n\n🔗 Updated invoice: <a href=".*?">View updated invoice<\/a>\n\n🗑 Please delete this original message manually if no longer needed\./
     );
 
     const primaryDoc = sentMessages.filter((m) => m.document === 'invoice_pdf_file_id').pop()!;

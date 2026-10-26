@@ -120,6 +120,9 @@ export interface Transaction {
   confirmationUrl: string | null;
   historyMessageId: number | null;
   metadataMessageId: number | null;
+  accountControlMessageId?: number | null;
+  historicalControlMessageIds?: number[];
+  supersededMessageIds?: number[];
   notes: InvoiceNote[];
   mediaFileId?: string | null;
   mediaType?: string | null;
@@ -144,6 +147,9 @@ export interface TransactionRow {
   confirmation_url: string | null;
   history_message_id: number | null;
   metadata_message_id: number | null;
+  account_control_message_id?: number | null;
+  historical_control_message_ids?: string | null;
+  superseded_message_ids?: string | null;
   notes: string | null;
   media_file_id?: string | null;
   media_type?: string | null;

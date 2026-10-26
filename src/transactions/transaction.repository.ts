@@ -112,27 +112,32 @@ export class TransactionRepository {
       ? rawChatId.slice(1)
       : '-100' + rawChatId;
 
+    const searchPattern = `%${messageId}%`;
     let row = await this.db.first<TransactionRow>(
       `SELECT * FROM transactions
        WHERE (telegram_chat_id = ? OR telegram_chat_id = ?)
          AND (
-           original_message_id = ? OR metadata_message_id = ? OR confirmation_message_id = ? OR history_message_id = ?
+           original_message_id = ? OR metadata_message_id = ? OR confirmation_message_id = ? OR history_message_id = ? OR account_control_message_id = ?
            OR id IN (SELECT transaction_id FROM invoice_additions WHERE message_id = ?)
            OR id IN (SELECT transaction_id FROM payments WHERE payment_message_id = ? OR confirmed_message_id = ? OR history_message_id = ?)
+           OR (superseded_message_ids IS NOT NULL AND superseded_message_ids LIKE ?)
+           OR (historical_control_message_ids IS NOT NULL AND historical_control_message_ids LIKE ?)
          )`,
-      [rawChatId, altChatId, messageId, messageId, messageId, messageId, messageId, messageId, messageId, messageId]
+      [rawChatId, altChatId, messageId, messageId, messageId, messageId, messageId, messageId, messageId, messageId, messageId, searchPattern, searchPattern]
     );
 
     if (!row) {
       row = await this.db.first<TransactionRow>(
         `SELECT * FROM transactions
          WHERE (
-           original_message_id = ? OR metadata_message_id = ? OR confirmation_message_id = ? OR history_message_id = ?
+           original_message_id = ? OR metadata_message_id = ? OR confirmation_message_id = ? OR history_message_id = ? OR account_control_message_id = ?
            OR id IN (SELECT transaction_id FROM invoice_additions WHERE message_id = ?)
            OR id IN (SELECT transaction_id FROM payments WHERE payment_message_id = ? OR confirmed_message_id = ? OR history_message_id = ?)
+           OR (superseded_message_ids IS NOT NULL AND superseded_message_ids LIKE ?)
+           OR (historical_control_message_ids IS NOT NULL AND historical_control_message_ids LIKE ?)
          )
          ORDER BY id DESC`,
-        [messageId, messageId, messageId, messageId, messageId, messageId, messageId, messageId]
+        [messageId, messageId, messageId, messageId, messageId, messageId, messageId, messageId, messageId, searchPattern, searchPattern]
       );
     }
 
@@ -339,6 +344,50 @@ export class TransactionRepository {
     await this.db.exec(
       'UPDATE transactions SET media_file_id = ?, media_type = ? WHERE id = ?',
       [mediaFileId, mediaType, id]
+    );
+  }
+
+  async updateAccountControlMessageId(
+    id: number,
+    accountControlMessageId: number | null
+  ): Promise<void> {
+    const row = await this.findById(id);
+    if (!row) return;
+    const oldId = row.account_control_message_id;
+    let hist: number[] = [];
+    if (row.historical_control_message_ids) {
+      try {
+        hist = JSON.parse(row.historical_control_message_ids);
+      } catch {
+        hist = [];
+      }
+    }
+    if (oldId && oldId !== accountControlMessageId && !hist.includes(oldId)) {
+      hist.push(oldId);
+    }
+    await this.db.exec(
+      'UPDATE transactions SET account_control_message_id = ?, historical_control_message_ids = ? WHERE id = ?',
+      [accountControlMessageId, JSON.stringify(hist), id]
+    );
+  }
+
+  async addSupersededMessageId(id: number, supersededId: number): Promise<void> {
+    const row = await this.findById(id);
+    if (!row) return;
+    let sup: number[] = [];
+    if (row.superseded_message_ids) {
+      try {
+        sup = JSON.parse(row.superseded_message_ids);
+      } catch {
+        sup = [];
+      }
+    }
+    if (!sup.includes(supersededId)) {
+      sup.push(supersededId);
+    }
+    await this.db.exec(
+      'UPDATE transactions SET superseded_message_ids = ?, history_message_id = COALESCE(history_message_id, ?) WHERE id = ?',
+      [JSON.stringify(sup), supersededId, id]
     );
   }
 

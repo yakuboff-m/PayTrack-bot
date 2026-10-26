@@ -230,15 +230,15 @@ describe('/add Workflow Regression Suite', () => {
     assert.ok(origEdited, 'Original invoice message 501 must have update notice');
     assert.match(
       origEdited.caption,
-      /⚠️ Invoice #INV0001 was updated\. View the updated invoice: <a href=".*?">View updated invoice<\/a>\. The original invoice media remains unchanged\. Please delete this original message manually if no longer needed\./
+      /⚠️ Invoice #INV0001 was updated\.\n\n🔗 Updated invoice: <a href=".*?">View updated invoice<\/a>\n\n🗑 Please delete this original message manually if no longer needed\./
     );
     assert.deepEqual(origEdited.reply_markup?.inline_keyboard, [], 'Keyboard must be removed from old message');
 
-    // Assert NO separate generic account details message was sent
-    const separateAccountMsgs = ctx.sentMessages.filter(
-      (m) => typeof m.text === 'string' && m.text.includes('Account details for')
+    // Assert account control message was created
+    const controlMsgs = ctx.sentMessages.filter(
+      (m) => m.reply_markup?.inline_keyboard?.[0]?.[0]?.text === 'Copy Account Number'
     );
-    assert.equal(separateAccountMsgs.length, 0, 'Must NOT send separate account details message');
+    assert.ok(controlMsgs.length >= 1, 'Account-control message must be present');
 
     // Assert NO generic companion notice message was sent
     const genericCompanionMsgs = ctx.sentMessages.filter(
@@ -317,15 +317,15 @@ describe('/add Workflow Regression Suite', () => {
     assert.ok(origEdited, 'Original message 502 must have update notice');
     assert.match(
       origEdited.caption,
-      /⚠️ Invoice #INV0001 was updated\. View the updated invoice: <a href=".*?">View updated invoice<\/a>\. The original invoice media remains unchanged\. Please delete this original message manually if no longer needed\./
+      /⚠️ Invoice #INV0001 was updated\.\n\n🔗 Updated invoice: <a href=".*?">View updated invoice<\/a>\n\n🗑 Please delete this original message manually if no longer needed\./
     );
     assert.deepEqual(origEdited.reply_markup?.inline_keyboard, []);
 
-    // Assert NO separate generic account details message was sent
-    const separateAccountMsgs = ctx.sentMessages.filter(
-      (m) => typeof m.text === 'string' && m.text.includes('Account details for')
+    // Assert account control message was created
+    const controlMsgs = ctx.sentMessages.filter(
+      (m) => m.reply_markup?.inline_keyboard?.[0]?.[0]?.text === 'Copy Account Number'
     );
-    assert.equal(separateAccountMsgs.length, 0, 'Must NOT send separate account details message');
+    assert.ok(controlMsgs.length >= 1, 'Account-control message must be present');
 
     const updatedTx = (await ctx.txRepo.findById(tx.id))!;
     assert.equal(updatedTx.metadata_message_id, origDoc.message_id);
@@ -380,26 +380,26 @@ describe('/add Workflow Regression Suite', () => {
     assert.ok(newDoc, 'New document message must be sent');
     assert.match(newDoc.caption, /💰 Invoice Total: ₩180,000/);
 
-    // Assert keyboard with Copy Account Number attached to new document message
-    assert.equal(
-      newDoc.reply_markup?.inline_keyboard?.[0]?.[0]?.text,
-      'Copy Account Number'
+    // Assert account control message with Copy Account Number exists
+    const controlMsg = ctx.sentMessages.find(
+      (m) => m.reply_markup?.inline_keyboard?.[0]?.[0]?.text === 'Copy Account Number'
     );
+    assert.ok(controlMsg, 'Account-control message must be present with button');
 
     // Assert original photo message (503) has update notice and direct link
     const origEdited = ctx.editedCaptions.find((e) => e.message_id === 503);
     assert.ok(origEdited, 'Original photo message 503 must have update notice');
     assert.match(
       origEdited.caption,
-      /⚠️ Invoice #INV0001 was updated\. View the updated invoice: <a href=".*?">View updated invoice<\/a>\. The original invoice media remains unchanged\. Please delete this original message manually if no longer needed\./
+      /⚠️ Invoice #INV0001 was updated\.\n\n🔗 Updated invoice: <a href=".*?">View updated invoice<\/a>\n\n🗑 Please delete this original message manually if no longer needed\./
     );
     assert.deepEqual(origEdited.reply_markup?.inline_keyboard, []);
 
-    // Assert NO separate generic account details message was sent
-    const separateAccountMsgs = ctx.sentMessages.filter(
-      (m) => typeof m.text === 'string' && m.text.includes('Account details for')
+    // Assert account control message was created
+    const controlMsgs = ctx.sentMessages.filter(
+      (m) => m.reply_markup?.inline_keyboard?.[0]?.[0]?.text === 'Copy Account Number'
     );
-    assert.equal(separateAccountMsgs.length, 0, 'Must NOT send separate account details message');
+    assert.ok(controlMsgs.length >= 1, 'Account-control message must be present');
 
     // Original media is preserved as photo
     const updatedTx = (await ctx.txRepo.findById(tx.id))!;
@@ -539,16 +539,15 @@ describe('/add Workflow Regression Suite', () => {
     assert.ok(origEdited, 'Original invoice message 505 must have update notice');
     assert.match(
       origEdited.caption,
-      /⚠️ Invoice #INV0001 was updated\. View the updated invoice: <a href=".*?">View updated invoice<\/a>\. The original invoice media remains unchanged\. Please delete this original message manually if no longer needed\./
+      /⚠️ Invoice #INV0001 was updated\.\n\n🔗 Updated invoice: <a href=".*?">View updated invoice<\/a>\n\n🗑 Please delete this original message manually if no longer needed\./
     );
     assert.deepEqual(origEdited.reply_markup?.inline_keyboard, []);
 
-    // Assert NO separate account details message was sent
-    const separateAccountMsgs = ctx.sentMessages.filter(
-      (m) => typeof m.text === 'string' && m.text.includes('Account details for')
+    // Assert account control message was created
+    const controlMsgs = ctx.sentMessages.filter(
+      (m) => m.reply_markup?.inline_keyboard?.[0]?.[0]?.text === 'Copy Account Number'
     );
-    assert.equal(separateAccountMsgs.length, 0, 'Must NOT send separate account details message');
-    assert.equal(separateAccountMsgs.length, 0, 'Must NOT send separate account details message');
+    assert.ok(controlMsgs.length >= 1, 'Account-control message must be present');
   });
 
   it('6. Failure safety: Telegram failure preserves source media and reports exact failure step', async () => {
@@ -695,7 +694,8 @@ describe('/add Workflow Regression Suite', () => {
     const primaryCaption = origPhotoMsg.caption;
     assert.match(primaryCaption, /🧾 INVOICE • #INV0001/);
     assert.match(primaryCaption, /🏢 Koreta/);
-    assert.match(primaryCaption, /💳 Hana Bank 012-345678-2341/);
+    assert.match(primaryCaption, /💳 Bank\/account details are shown only in the separate account-control message\./);
+    assert.doesNotMatch(primaryCaption, /012-345678-2341/, 'Bank account number must NOT appear in primary caption');
     assert.match(primaryCaption, /👤 Koreta CoLtd/);
     assert.match(primaryCaption, /Original Registration:/);
     assert.match(primaryCaption, /Registered Amount:\n└─> 💰 ₩450,000/);
@@ -718,15 +718,15 @@ describe('/add Workflow Regression Suite', () => {
     assert.ok(origEdited, 'Original invoice message 901 must have update notice');
     assert.match(
       origEdited.caption,
-      /⚠️ Invoice #INV0001 was updated\. View the updated invoice: <a href=".*?">View updated invoice<\/a>\. The original invoice media remains unchanged\. Please delete this original message manually if no longer needed\./
+      /⚠️ Invoice #INV0001 was updated\.\n\n🔗 Updated invoice: <a href=".*?">View updated invoice<\/a>\n\n🗑 Please delete this original message manually if no longer needed\./
     );
     assert.deepEqual(origEdited.reply_markup?.inline_keyboard, []);
 
-    // 5. Assert NO separate account details message was sent
-    const separateAccountMsgs = ctx.sentMessages.filter(
-      (m) => typeof m.text === 'string' && m.text.includes('Account details for')
+    // 5. Assert account control message was created
+    const controlMsgs = ctx.sentMessages.filter(
+      (m) => m.reply_markup?.inline_keyboard?.[0]?.[0]?.text === 'Copy Account Number'
     );
-    assert.equal(separateAccountMsgs.length, 0, 'Must NOT send separate account details message');
+    assert.ok(controlMsgs.length >= 1, 'Account-control message must be present');
 
     // 6. Database records the invoice correctly
     const updatedTx = (await ctx.txRepo.findById(tx.id))!;
@@ -819,15 +819,15 @@ describe('/add Workflow Regression Suite', () => {
     assert.ok(origEdited, 'Original invoice message 701 must have update notice');
     assert.match(
       origEdited.caption,
-      /⚠️ Invoice #INV0001 was updated\. View the updated invoice: <a href=".*?">View updated invoice<\/a>\. The original invoice media remains unchanged\. Please delete this original message manually if no longer needed\./
+      /⚠️ Invoice #INV0001 was updated\.\n\n🔗 Updated invoice: <a href=".*?">View updated invoice<\/a>\n\n🗑 Please delete this original message manually if no longer needed\./
     );
     assert.deepEqual(origEdited.reply_markup?.inline_keyboard, []);
 
-    // 8. Assert NO separate account details message was sent
-    const separateAccountMsgs = ctx.sentMessages.filter(
-      (m) => typeof m.text === 'string' && m.text.includes('Account details for')
+    // 8. Assert account control message was created
+    const controlMsgs = ctx.sentMessages.filter(
+      (m) => m.reply_markup?.inline_keyboard?.[0]?.[0]?.text === 'Copy Account Number'
     );
-    assert.equal(separateAccountMsgs.length, 0, 'Must NOT send separate account details message');
+    assert.ok(controlMsgs.length >= 1, 'Account-control message must be present');
 
     // 9. Assert invoice heading occurs exactly once
     const headingMatches = primaryCaption.match(/🧾 INVOICE • #INV0001/g);
