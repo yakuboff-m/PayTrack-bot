@@ -350,11 +350,15 @@ describe('Plain-Text Meat Invoice Calculator', () => {
       assert.equal(tx.distributor_id, distributor.id);
       assert.equal(tx.amount, 1431216);
 
-      // Verify bot sent the formatted invoice display with copy button
-      assert.equal(sentMessages.length, 2);
+      // Verify bot sent the formatted invoice display with copy button attached directly
+      assert.equal(sentMessages.length, 1);
       assert.match(sentMessages[0].text, /MEAT INVOICE/);
       assert.match(sentMessages[0].text, /₩1,431,216/);
       assert.match(sentMessages[0].text, /Baraka Go'sht/);
+      assert.equal(
+        sentMessages[0].reply_markup?.inline_keyboard?.[0]?.[0]?.text,
+        'Copy Account Number'
+      );
 
       // Verify the command message was deleted
       assert.ok(deletedMessageIds.includes(101));
@@ -428,8 +432,12 @@ describe('Plain-Text Meat Invoice Calculator', () => {
       assert.ok(tx);
       assert.equal(tx.distributor_id, distributor.id);
       assert.equal(tx.amount, 280700);
-      assert.equal(sentMessages.length, 2);
+      assert.equal(sentMessages.length, 1);
       assert.match(sentMessages[0].text, /₩280,700/);
+      assert.equal(
+        sentMessages[0].reply_markup?.inline_keyboard?.[0]?.[0]?.text,
+        'Copy Account Number'
+      );
     });
 
     it('prevents accidental duplicate registration when Telegram retries the update', async () => {
@@ -454,12 +462,12 @@ describe('Plain-Text Meat Invoice Calculator', () => {
 
       // First delivery
       await bot.handleUpdate(update as any);
-      assert.equal(sentMessages.length, 2);
+      assert.equal(sentMessages.length, 1);
 
       // Telegram retry of the same update
       await bot.handleUpdate(update as any);
       // Ensure no second message was sent and no duplicate row was created
-      assert.equal(sentMessages.length, 2);
+      assert.equal(sentMessages.length, 1);
 
       const rows = await txRepo.findByMessageId(String(testConfig.telegramGroupId), 301);
       assert.ok(rows);
@@ -604,9 +612,13 @@ describe('Plain-Text Meat Invoice Calculator', () => {
       assert.equal(tx.status, 'PENDING');
       assert.equal(tx.distributor_id, dist.id);
       assert.equal(tx.amount, 125000);
-      assert.equal(sentMessages.length, 2);
+      assert.equal(sentMessages.length, 1);
       assert.match(sentMessages[0].text, /Ikhlas Market/);
       assert.match(sentMessages[0].text, /₩125,000/);
+      assert.equal(
+        sentMessages[0].reply_markup?.inline_keyboard?.[0]?.[0]?.text,
+        'Copy Account Number'
+      );
     });
 
     it('standalone /amount in forum topic does not produce already-confirmed error', async () => {

@@ -220,11 +220,12 @@ describe('Regression Repair Sequence Suite', () => {
     assert.equal(tx1.mediaFileId, 'original_invoice_photo_id');
     assert.equal(tx1.mediaType, 'photo');
 
-    // Verify caption and inline keyboard on primary message
+    // Verify caption and inline keyboard directly on primary photo invoice message
     assert.match(registeredBotMsg.caption, /🧾 INVOICE • #INV0001/);
     assert.match(registeredBotMsg.caption, /🏢 Koreta/);
-    assert.match(registeredBotMsg.caption, /💳 Bank\/account details are shown only in the separate account-control message\./);
-    assert.match(registeredBotMsg.caption, /👤 Koreta CoLtd/);
+    assert.doesNotMatch(registeredBotMsg.caption, /012-345678-2341/, 'Bank account number must NOT appear in primary caption');
+    assert.doesNotMatch(registeredBotMsg.caption, /Hana Bank/, 'Bank name must NOT appear in primary caption');
+    assert.doesNotMatch(registeredBotMsg.caption, /Koreta CoLtd/, 'Account holder must NOT appear in primary caption');
     assert.match(registeredBotMsg.caption, /📥 Original Registration:/);
     assert.match(registeredBotMsg.caption, /💵 Registered Amount:\n└─> 💰 ₩340,000/);
     assert.match(registeredBotMsg.caption, /💰 Invoice Total: ₩340,000/);
@@ -232,13 +233,21 @@ describe('Regression Repair Sequence Suite', () => {
     assert.match(registeredBotMsg.caption, /⚖️ Need to Pay: ₩340,000/);
     assert.match(registeredBotMsg.caption, /📊 Status: ⏳ PENDING/);
 
-    // Account-control message contains bank details and Copy Account Number button
-    const controlMsg = sentMessages.find(
-      (m) => m.reply_markup?.inline_keyboard?.[0]?.[0]?.text === 'Copy Account Number'
+    // Copy Account Number button is attached directly to the initial invoice message
+    assert.equal(
+      registeredBotMsg.reply_markup?.inline_keyboard?.[0]?.[0]?.text,
+      'Copy Account Number'
     );
-    assert.ok(controlMsg, 'Account-control message must be present');
-    assert.match(controlMsg.text, /Hana Bank/);
-    assert.match(controlMsg.text, /012-345678-2341/);
+    assert.equal(
+      registeredBotMsg.reply_markup?.inline_keyboard?.[0]?.[0]?.copy_text?.text,
+      '012-345678-2341'
+    );
+
+    // No separate account-control message during initial registration
+    const separateControlMsgs = sentMessages.filter(
+      (m) => m.text && /Account details for #INV0001/.test(m.text)
+    );
+    assert.equal(separateControlMsgs.length, 0, 'Must NOT send a separate account-control message during registration');
 
     // ─────────────────────────────────────────────────────────────
     // Step 2: /add 200,000 while replying to the invoice with new media
@@ -304,7 +313,7 @@ describe('Regression Repair Sequence Suite', () => {
     const activeControlMsgs = sentMessages.filter((m) =>
       typeof m.text === 'string' && m.text.includes('Account details for')
     );
-    assert.equal(activeControlMsgs.length, 2, 'Must have account-control messages (step 1 + replacement in step 2)');
+    assert.equal(activeControlMsgs.length, 1, 'Must have exactly one account-control message created for the media group');
 
     // Verify NO generic companion notice message was sent
     const genericCompanionMsgs = sentMessages.filter((m) =>

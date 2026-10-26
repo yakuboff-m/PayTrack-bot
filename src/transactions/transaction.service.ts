@@ -313,6 +313,7 @@ export class TransactionService {
       payments: paymentsList,
       notes: tx.notes,
       maxCaptionLength: maxLen,
+      hasSeparateAccountControlMessage: Boolean(tx.accountControlMessageId),
     });
   }
 
@@ -353,14 +354,22 @@ export class TransactionService {
       maxLen
     );
 
+    const dist = distributor || transaction.distributorSnapshot;
+    const effectiveKeyboard =
+      keyboard || (dist?.accountNumber ? copyAccountKeyboard(dist.accountNumber) : undefined);
+
     // ── If the bot already owns the message, just edit it ────
     if (transaction.metadataMessageId) {
       try {
+        const editMarkup = !transaction.accountControlMessageId ? effectiveKeyboard : undefined;
         if (msgType === 'text') {
-          await api.editMessageText(chatId, transaction.metadataMessageId, safeCaption);
+          await api.editMessageText(chatId, transaction.metadataMessageId, safeCaption, {
+            reply_markup: editMarkup,
+          });
         } else {
           await api.editMessageCaption(chatId, transaction.metadataMessageId, {
             caption: safeCaption,
+            reply_markup: editMarkup,
           });
         }
         return { botMessageId: transaction.metadataMessageId };
@@ -373,6 +382,7 @@ export class TransactionService {
     // ── Re-send as bot if direct edit failed or message is user-owned ────
     let botMsg: Message;
     try {
+      const sendMarkup = !transaction.accountControlMessageId ? effectiveKeyboard : undefined;
       switch (msgType) {
         case 'photo': {
           // Get the highest-resolution photo
@@ -381,6 +391,7 @@ export class TransactionService {
           botMsg = await api.sendPhoto(chatId, fileId, {
             caption: safeCaption,
             message_thread_id: topicId,
+            reply_markup: sendMarkup,
           });
           break;
         }
@@ -389,6 +400,7 @@ export class TransactionService {
           botMsg = await api.sendDocument(chatId, fileId, {
             caption: safeCaption,
             message_thread_id: topicId,
+            reply_markup: sendMarkup,
           });
           break;
         }
@@ -396,6 +408,7 @@ export class TransactionService {
         default: {
           botMsg = await api.sendMessage(chatId, safeCaption, {
             message_thread_id: topicId,
+            reply_markup: sendMarkup,
           });
           break;
         }
@@ -415,23 +428,6 @@ export class TransactionService {
     // Persist the bot message ID
     await this.repo.updateMetadataMessageId(transaction.id, botMsg.message_id);
     transaction.metadataMessageId = botMsg.message_id;
-
-    // Send exactly one separate account-control message if distributor has account details
-    const dist = distributor || transaction.distributorSnapshot;
-    if (dist?.accountNumber && !transaction.accountControlMessageId) {
-      try {
-        const controlText = formatAccountControlMessage(transaction.id, dist);
-        const controlMsg = await api.sendMessage(chatId, controlText, {
-          message_thread_id: topicId,
-          reply_markup: copyAccountKeyboard(dist.accountNumber),
-          parse_mode: 'HTML',
-        });
-        await this.repo.updateAccountControlMessageId(transaction.id, controlMsg.message_id);
-        transaction.accountControlMessageId = controlMsg.message_id;
-      } catch (btnErr) {
-        console.warn('Failed to send account control message:', (btnErr as Error).message);
-      }
-    }
 
     // Persist media file id and media type if not already stored
     let savedFileId: string | null = null;
@@ -1068,10 +1064,16 @@ export class TransactionService {
               isMedia ? MAX_CAPTION_LENGTH : MAX_TEXT_LENGTH
             );
 
+            const pendingKeyboard =
+              !transaction.accountControlMessageId && transaction.distributorSnapshot?.accountNumber
+                ? copyAccountKeyboard(transaction.distributorSnapshot.accountNumber)
+                : undefined;
+
             if (isMedia) {
               try {
                 await api.editMessageCaption(chatId, invoiceMessageId, {
                   caption: newContent,
+                  reply_markup: pendingKeyboard,
                 });
               } catch (editErr: unknown) {
                 console.warn(
@@ -1084,7 +1086,10 @@ export class TransactionService {
                 await api.editMessageText(
                   chatId,
                   invoiceMessageId,
-                  newContent
+                  newContent,
+                  {
+                    reply_markup: pendingKeyboard,
+                  }
                 );
               } catch (textErr: unknown) {
                 console.warn(
@@ -1305,6 +1310,12 @@ export class TransactionService {
         }
       }
 
+      const hasAddedMedia = Boolean(addPhoto || addDoc);
+      const isMedia =
+        originalMediaType === 'photo' ||
+        originalMediaType === 'document' ||
+        Boolean(repliedMessage.photo || repliedMessage.document);
+
       // Compose caption
       const repliedText = repliedMessage.text ?? repliedMessage.caption ?? '';
       const { original } = splitOriginalAndMetadata(repliedText);
@@ -1323,6 +1334,7 @@ export class TransactionService {
         payments: paymentsList,
         notes: transaction.notes,
         maxCaptionLength: MAX_CAPTION_LENGTH,
+        hasSeparateAccountControlMessage: hasAddedMedia ? true : Boolean(transaction.accountControlMessageId),
       });
 
       const targetMessageId = transaction.metadataMessageId ?? repliedMessage.message_id;
@@ -1331,11 +1343,6 @@ export class TransactionService {
         : undefined;
 
       let newInvoiceMsg: Message;
-      const hasAddedMedia = Boolean(addPhoto || addDoc);
-      const isMedia =
-        originalMediaType === 'photo' ||
-        originalMediaType === 'document' ||
-        Boolean(repliedMessage.photo || repliedMessage.document);
 
       if (hasAddedMedia) {
         // ── Case A: /add includes new invoice media ────────────────
@@ -1521,17 +1528,25 @@ export class TransactionService {
       } else {
         // ── Case B: Amount-only addition (no new media) ────────────
         // Edit existing message in place
+        const buttonMarkup =
+          !transaction.accountControlMessageId && keyboard
+            ? keyboard
+            : undefined;
+
         let editSucceeded = false;
         if (isMedia) {
           try {
             await api.editMessageCaption(chatId, targetMessageId, {
               caption: safeCaption,
+              reply_markup: buttonMarkup,
             });
             editSucceeded = true;
           } catch (capErr: unknown) {
             if (isNoTextMessageError(capErr)) {
               try {
-                await api.editMessageText(chatId, targetMessageId, safeCaption);
+                await api.editMessageText(chatId, targetMessageId, safeCaption, {
+                  reply_markup: buttonMarkup,
+                });
                 editSucceeded = true;
               } catch {
                 /* fall through to re-send fallback */
@@ -1540,13 +1555,16 @@ export class TransactionService {
           }
         } else {
           try {
-            await api.editMessageText(chatId, targetMessageId, safeCaption);
+            await api.editMessageText(chatId, targetMessageId, safeCaption, {
+              reply_markup: buttonMarkup,
+            });
             editSucceeded = true;
           } catch (txtErr: unknown) {
             if (isNoTextMessageError(txtErr)) {
               try {
                 await api.editMessageCaption(chatId, targetMessageId, {
                   caption: safeCaption,
+                  reply_markup: buttonMarkup,
                 });
                 editSucceeded = true;
               } catch {
@@ -1569,17 +1587,20 @@ export class TransactionService {
                 caption: safeCaption,
                 message_thread_id: pendingTopicId,
                 parse_mode: 'HTML',
+                reply_markup: buttonMarkup,
               });
             } else if (originalMediaType === 'document' && originalMediaFileId) {
               newInvoiceMsg = await api.sendDocument(chatId, originalMediaFileId, {
                 caption: safeCaption,
                 message_thread_id: pendingTopicId,
                 parse_mode: 'HTML',
+                reply_markup: buttonMarkup,
               });
             } else {
               newInvoiceMsg = await api.sendMessage(chatId, safeCaption, {
                 message_thread_id: pendingTopicId,
                 parse_mode: 'HTML',
+                reply_markup: buttonMarkup,
               });
             }
 

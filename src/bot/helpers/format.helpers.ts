@@ -379,6 +379,7 @@ export interface BuildUnifiedInvoiceCaptionParams {
   payments?: PaymentEvent[];
   notes?: InvoiceNote[];
   maxCaptionLength?: number;
+  hasSeparateAccountControlMessage?: boolean;
 }
 
 /**
@@ -408,12 +409,8 @@ export function buildUnifiedInvoiceCaption(params: BuildUnifiedInvoiceCaptionPar
 
   if (params.distributor) {
     headerLines.push(`🏢 ${params.distributor.name}`);
-    const hasBank = Boolean(params.distributor.bankName || params.distributor.accountNumber);
-    if (hasBank) {
+    if (params.hasSeparateAccountControlMessage) {
       headerLines.push('💳 Bank/account details are shown only in the separate account-control message.');
-    }
-    if (params.distributor.accountHolder) {
-      headerLines.push(`👤 ${params.distributor.accountHolder}`);
     }
   }
 

@@ -696,7 +696,7 @@ describe('/add Workflow Regression Suite', () => {
     assert.match(primaryCaption, /🏢 Koreta/);
     assert.match(primaryCaption, /💳 Bank\/account details are shown only in the separate account-control message\./);
     assert.doesNotMatch(primaryCaption, /012-345678-2341/, 'Bank account number must NOT appear in primary caption');
-    assert.match(primaryCaption, /👤 Koreta CoLtd/);
+    assert.doesNotMatch(primaryCaption, /Koreta CoLtd/, 'Account holder must NOT appear in primary caption');
     assert.match(primaryCaption, /Original Registration:/);
     assert.match(primaryCaption, /Registered Amount:\n└─> 💰 ₩450,000/);
     assert.match(primaryCaption, /Invoice Addition/);
