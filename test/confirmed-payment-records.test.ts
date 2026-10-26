@@ -111,7 +111,7 @@ async function setupTestContext(options: TestContextOptions = {}) {
 
     if (method === 'copyMessage') {
       const id = 9000 + copiedMessages.length;
-      copiedMessages.push({ ...payload, message_id: id });
+      copiedMessages.push({ ...payload, from_message_id: payload.message_id, message_id: id });
       return {
         ok: true,
         result: {
@@ -197,7 +197,7 @@ async function setupTestContext(options: TestContextOptions = {}) {
 describe('Confirmed Topic Payment Records & Audit Trail Integration Tests', () => {
   it('1. First partial payment: creates identifiable confirmation and preserved receipt evidence', async () => {
     const ctx = await setupTestContext();
-    const { bot, txRepo, sentMediaGroups, createInvoice } = ctx;
+    const { bot, txRepo, sentMessages, copiedMessages, createInvoice } = ctx;
 
     // Register invoice for ₩500,000
     await createInvoice(1001, 500000);
@@ -227,31 +227,30 @@ describe('Confirmed Topic Payment Records & Audit Trail Integration Tests', () =
       },
     } as any);
 
-    // Verify media group sent to Confirmed topic
-    assert.equal(sentMediaGroups.length, 1);
-    const album = sentMediaGroups[0];
-    assert.equal(album.media.length, 2);
+    // Separate visible text message sent to Confirmed topic
+    const confirmedTextMsgs = sentMessages.filter(
+      (m) => m.message_thread_id === testConfig.confirmedTopicId
+    );
+    assert.equal(confirmedTextMsgs.length, 1);
+    const textMsg = confirmedTextMsgs[0].text;
+    assert.match(textMsg, /⏳ PARTIALLY PAID • #INV0001/);
+    assert.match(textMsg, /🏢 Meat Wholesaler Co/);
+    assert.match(textMsg, /💰 Total: ₩500,000/);
+    assert.match(textMsg, /💵 Payment: ₩150,000/);
+    assert.match(textMsg, /📊 Total Paid: ₩150,000/);
+    assert.match(textMsg, /⚖️ Remaining Balance: ₩350,000/);
+    assert.match(textMsg, /📝 Payment Note: first installment/);
+    assert.match(textMsg, /🧾 Receipt: \[View payment receipt\]/);
 
-    // Confirmation Header (album item 0)
-    const headerCaption = album.media[0].caption;
-    assert.match(headerCaption, /⏳ PARTIALLY PAID • #INV0001/);
-    assert.match(headerCaption, /🏢 Meat Wholesaler Co/);
-    assert.match(headerCaption, /💰 Total: ₩500,000/);
-    assert.match(headerCaption, /💵 Payment: ₩150,000/);
-    assert.match(headerCaption, /📊 Total Paid: ₩150,000/);
-    assert.match(headerCaption, /⚖️ Remaining Balance: ₩350,000/);
-    assert.match(headerCaption, /📝 Payment Note: first installment/);
-
-    // Receipt Evidence (album item 1) - must NOT be orphaned, must have full identity
-    const receiptCaption = album.media[1].caption;
-    assert.match(receiptCaption, /🧾 Payment Receipt: first installment • #INV0001/);
-    assert.match(receiptCaption, /🏢 Meat Wholesaler Co/);
-    assert.match(receiptCaption, /💰 Invoice Total: ₩500,000/);
-    assert.match(receiptCaption, /💵 Amount Received: ₩150,000/);
-    assert.match(receiptCaption, /📊 Total Paid: ₩150,000/);
-    assert.match(receiptCaption, /⚖️ Remaining Balance: ₩350,000/);
-    assert.match(receiptCaption, /⏳ Status: ⏳ PARTIALLY PAID/);
-    assert.match(receiptCaption, /💸 Paid At:/);
+    // Both invoice and receipt media copied into Confirmed as separate media messages
+    const invoiceCopy = copiedMessages.find(
+      (c) => c.from_message_id === 1001 && c.message_thread_id === testConfig.confirmedTopicId
+    );
+    assert.ok(invoiceCopy, 'Invoice media copied to Confirmed');
+    const receiptCopy = copiedMessages.find(
+      (c) => c.from_message_id === 1002 && c.message_thread_id === testConfig.confirmedTopicId
+    );
+    assert.ok(receiptCopy, 'Receipt media copied to Confirmed');
 
     // Verify DB transaction status
     const updatedTx = await txRepo.findById(1);
@@ -265,12 +264,12 @@ describe('Confirmed Topic Payment Records & Audit Trail Integration Tests', () =
     assert.equal(payments[0].balance_due, 350000);
     assert.equal(payments[0].note, 'first installment');
     assert.ok(payments[0].receipt_url);
-    assert.equal(payments[0].receipt_message_id, 8001);
+    assert.equal(payments[0].receipt_message_id, receiptCopy.message_id);
   });
 
   it('2. Multiple partial payments: each has its own confirmation, no redundant invoice copies', async () => {
     const ctx = await setupTestContext();
-    const { bot, txRepo, sentMediaGroups, copiedMessages, createInvoice } = ctx;
+    const { bot, txRepo, sentMessages, copiedMessages, createInvoice } = ctx;
 
     // Register invoice for ₩500,000
     await createInvoice(2001, 500000);
@@ -296,7 +295,8 @@ describe('Confirmed Topic Payment Records & Audit Trail Integration Tests', () =
       },
     } as any);
 
-    assert.equal(sentMediaGroups.length, 1, 'First payment sends album with invoice + receipt');
+    const firstTextMsgs = sentMessages.filter((m) => m.message_thread_id === testConfig.confirmedTopicId);
+    assert.equal(firstTextMsgs.length, 1, 'First payment sends text confirmation');
     const initialCopiedCount = copiedMessages.length;
 
     // Second partial payment: ₩200,000 with its own receipt
@@ -321,22 +321,23 @@ describe('Confirmed Topic Payment Records & Audit Trail Integration Tests', () =
     } as any);
 
     // CRITICAL REQUIREMENT: No redundant copy of invoice message on second payment!
-    assert.equal(sentMediaGroups.length, 1, 'Second payment must NOT send another invoice media group');
     assert.equal(copiedMessages.length, initialCopiedCount + 1, 'Second payment copies only the receipt media');
-
     const secondPaymentReceiptCopy = copiedMessages[copiedMessages.length - 1];
     assert.equal(secondPaymentReceiptCopy.message_thread_id, testConfig.confirmedTopicId);
-    assert.equal(secondPaymentReceiptCopy.reply_to_message_id, 8000, 'Replies directly to the original primary confirmation');
+    assert.equal(secondPaymentReceiptCopy.from_message_id, 2003);
 
-    // Second receipt caption must carry complete identifiable financial context
-    const secondReceiptCaption = secondPaymentReceiptCopy.caption;
-    assert.match(secondReceiptCaption, /🧾 Payment Receipt: p2 • #INV0001/);
-    assert.match(secondReceiptCaption, /🏢 Meat Wholesaler Co/);
-    assert.match(secondReceiptCaption, /💰 Invoice Total: ₩500,000/);
-    assert.match(secondReceiptCaption, /💵 Amount Received: ₩200,000/);
-    assert.match(secondReceiptCaption, /📊 Total Paid: ₩350,000/);
-    assert.match(secondReceiptCaption, /⚖️ Remaining Balance: ₩150,000/);
-    assert.match(secondReceiptCaption, /⏳ Status: ⏳ PARTIALLY PAID/);
+    // Second payment sends separate visible text confirmation message
+    const allConfirmedTexts = sentMessages.filter((m) => m.message_thread_id === testConfig.confirmedTopicId);
+    assert.equal(allConfirmedTexts.length, 2);
+    const secondText = allConfirmedTexts[1].text;
+    assert.match(secondText, /⏳ PARTIALLY PAID • #INV0001/);
+    assert.match(secondText, /🏢 Meat Wholesaler Co/);
+    assert.match(secondText, /💰 Total: ₩500,000/);
+    assert.match(secondText, /💵 Payment: ₩200,000/);
+    assert.match(secondText, /📊 Total Paid: ₩350,000/);
+    assert.match(secondText, /⚖️ Remaining Balance: ₩150,000/);
+    assert.match(secondText, /📝 Payment Note: p2/);
+    assert.match(secondText, /🧾 Receipt: \[View payment receipt\]/);
 
     // Historical integrity: verify first payment amount in ledger was NOT overwritten
     const payments = await txRepo.getPayments(1);
@@ -353,7 +354,7 @@ describe('Confirmed Topic Payment Records & Audit Trail Integration Tests', () =
 
   it('3. Final payment clearing remaining balance: status PAID and balance ₩0', async () => {
     const ctx = await setupTestContext();
-    const { bot, txRepo, copiedMessages, createInvoice } = ctx;
+    const { bot, txRepo, sentMessages, copiedMessages, createInvoice } = ctx;
 
     // Register invoice for ₩500,000
     await createInvoice(3001, 500000);
@@ -403,12 +404,13 @@ describe('Confirmed Topic Payment Records & Audit Trail Integration Tests', () =
     const tx = await txRepo.findById(1);
     assert.equal(tx?.status, 'PAID');
 
-    const finalReceiptCopy = copiedMessages[copiedMessages.length - 1];
-    assert.match(finalReceiptCopy.caption, /🧾 Payment Receipt: final payment in full • #INV0001/);
-    assert.match(finalReceiptCopy.caption, /💵 Amount Received: ₩150,000/);
-    assert.match(finalReceiptCopy.caption, /📊 Total Paid: ₩500,000/);
-    assert.match(finalReceiptCopy.caption, /⚖️ Remaining Balance: ₩0/);
-    assert.match(finalReceiptCopy.caption, /⏳ Status: ✅ PAID/);
+    const allConfirmedTexts = sentMessages.filter((m) => m.message_thread_id === testConfig.confirmedTopicId);
+    assert.equal(allConfirmedTexts.length, 2);
+    const finalConfirmation = allConfirmedTexts[allConfirmedTexts.length - 1].text;
+    assert.match(finalConfirmation, /✅ PAID • #INV0001/);
+    assert.match(finalConfirmation, /💵 Payment: ₩150,000/);
+    assert.match(finalConfirmation, /📊 Total Paid: ₩500,000/);
+    assert.match(finalConfirmation, /⚖️ Remaining Balance: ₩0/);
 
     const payments = await txRepo.getPayments(1);
     assert.equal(payments.length, 2);
@@ -419,7 +421,7 @@ describe('Confirmed Topic Payment Records & Audit Trail Integration Tests', () =
 
   it('4. Full payment in one operation: complete confirmation and receipt evidence', async () => {
     const ctx = await setupTestContext();
-    const { bot, sentMediaGroups, createInvoice } = ctx;
+    const { bot, sentMessages, copiedMessages, createInvoice } = ctx;
 
     // Register invoice for ₩300,000
     await createInvoice(4001, 300000);
@@ -445,28 +447,34 @@ describe('Confirmed Topic Payment Records & Audit Trail Integration Tests', () =
       },
     } as any);
 
-    assert.equal(sentMediaGroups.length, 1);
-    const album = sentMediaGroups[0];
+    const confirmedTextMsgs = sentMessages.filter(
+      (m) => m.message_thread_id === testConfig.confirmedTopicId
+    );
+    assert.equal(confirmedTextMsgs.length, 1);
+    const textMsg = confirmedTextMsgs[0].text;
 
-    // Check header
-    assert.match(album.media[0].caption, /✅ PAID • #INV0001/);
-    assert.match(album.media[0].caption, /🏢 Meat Wholesaler Co/);
-    assert.match(album.media[0].caption, /💰 Total: ₩300,000/);
-    assert.match(album.media[0].caption, /💵 Payment: ₩300,000/);
-    assert.match(album.media[0].caption, /📊 Total Paid: ₩300,000/);
-    assert.match(album.media[0].caption, /⚖️ Remaining Balance: ₩0/);
+    // Check header & details
+    assert.match(textMsg, /✅ PAID • #INV0001/);
+    assert.match(textMsg, /🏢 Meat Wholesaler Co/);
+    assert.match(textMsg, /💰 Total: ₩300,000/);
+    assert.match(textMsg, /💵 Payment: ₩300,000/);
+    assert.match(textMsg, /📊 Total Paid: ₩300,000/);
+    assert.match(textMsg, /⚖️ Remaining Balance: ₩0/);
+    assert.match(textMsg, /🧾 Receipt: \[View payment receipt\]/);
 
-    // Check receipt
-    assert.match(album.media[1].caption, /🧾 Payment Receipt: Paid in full via Shinhan Bank • #INV0001/);
-    assert.match(album.media[1].caption, /💵 Amount Received: ₩300,000/);
-    assert.match(album.media[1].caption, /📊 Total Paid: ₩300,000/);
-    assert.match(album.media[1].caption, /⚖️ Remaining Balance: ₩0/);
-    assert.match(album.media[1].caption, /⏳ Status: ✅ PAID/);
+    const invoiceCopy = copiedMessages.find(
+      (c) => c.from_message_id === 4001 && c.message_thread_id === testConfig.confirmedTopicId
+    );
+    assert.ok(invoiceCopy);
+    const receiptCopy = copiedMessages.find(
+      (c) => c.from_message_id === 4002 && c.message_thread_id === testConfig.confirmedTopicId
+    );
+    assert.ok(receiptCopy);
   });
 
   it('5. Invoices with /add additions: confirms original amount, total added, and new total accurately', async () => {
     const ctx = await setupTestContext();
-    const { bot, txRepo, sentMediaGroups, createInvoice } = ctx;
+    const { bot, txRepo, sentMessages, createInvoice } = ctx;
 
     // Register original invoice: ₩200,000
     await createInvoice(5001, 200000);
@@ -517,30 +525,24 @@ describe('Confirmed Topic Payment Records & Audit Trail Integration Tests', () =
       },
     } as any);
 
-    // Album in Confirmed topic verifies breakdown
-    const confirmedGroups = sentMediaGroups.filter(
-      (g) => g.message_thread_id === testConfig.confirmedTopicId
+    // Text confirmation in Confirmed topic verifies breakdown
+    const confirmedTextMsgs = sentMessages.filter(
+      (m) => m.message_thread_id === testConfig.confirmedTopicId
     );
-    assert.equal(confirmedGroups.length, 1);
-    const header = confirmedGroups[0].media[0].caption;
-    assert.match(header, /📥 Original Invoice: ₩200,000/);
-    assert.match(header, /➕ Total Added: ₩100,000/);
-    assert.match(header, /💰 Updated Total: ₩300,000/);
-    assert.match(header, /💵 Payment: ₩120,000/);
-    assert.match(header, /📊 Total Paid: ₩120,000/);
-    assert.match(header, /⚖️ Remaining Balance: ₩180,000/);
-
-    // Receipt caption also verifies breakdown
-    const receipt = confirmedGroups[0].media[1].caption;
-    assert.match(receipt, /📥 Original: ₩200,000 \| ➕ Additions: ₩100,000/);
-    assert.match(receipt, /💰 Invoice Total: ₩300,000/);
-    assert.match(receipt, /💵 Amount Received: ₩120,000/);
-    assert.match(receipt, /⚖️ Remaining Balance: ₩180,000/);
+    assert.equal(confirmedTextMsgs.length, 1);
+    const textMsg = confirmedTextMsgs[0].text;
+    assert.match(textMsg, /📥 Original Invoice: ₩200,000/);
+    assert.match(textMsg, /➕ Total Added: ₩100,000/);
+    assert.match(textMsg, /💰 Updated Total: ₩300,000/);
+    assert.match(textMsg, /💵 Payment: ₩120,000/);
+    assert.match(textMsg, /📊 Total Paid: ₩120,000/);
+    assert.match(textMsg, /⚖️ Remaining Balance: ₩180,000/);
+    assert.match(textMsg, /🧾 Receipt: \[View payment receipt\]/);
   });
 
   it('6. Retry / idempotency: duplicated Telegram update does not duplicate payments or corrupt ledger', async () => {
     const ctx = await setupTestContext();
-    const { bot, txRepo, sentMediaGroups, createInvoice } = ctx;
+    const { bot, txRepo, sentMessages, createInvoice } = ctx;
 
     // Register invoice for ₩200,000
     await createInvoice(6001, 200000);
@@ -567,13 +569,19 @@ describe('Confirmed Topic Payment Records & Audit Trail Integration Tests', () =
 
     // First processing
     await bot.handleUpdate(paymentUpdate as any);
-    assert.equal(sentMediaGroups.length, 1);
+    const confirmedCount1 = sentMessages.filter(
+      (m) => m.message_thread_id === testConfig.confirmedTopicId
+    ).length;
+    assert.equal(confirmedCount1, 1);
     const payments1 = await txRepo.getPayments(1);
     assert.equal(payments1.length, 1);
 
     // Retried update (Telegram network retry)
     await bot.handleUpdate(paymentUpdate as any);
-    assert.equal(sentMediaGroups.length, 1, 'No duplicate confirmation sent to Telegram');
+    const confirmedCount2 = sentMessages.filter(
+      (m) => m.message_thread_id === testConfig.confirmedTopicId
+    ).length;
+    assert.equal(confirmedCount2, 1, 'No duplicate confirmation sent to Telegram');
     const payments2 = await txRepo.getPayments(1);
     assert.equal(payments2.length, 1, 'No duplicate payment row inserted into ledger');
     assert.equal(payments2[0].amount, 200000);
@@ -659,16 +667,7 @@ describe('Confirmed Topic Payment Records & Audit Trail Integration Tests', () =
       (m) => m.message_thread_id === testConfig.confirmedTopicId
     );
     assert.equal(receiptCopies.length, 1);
-    assert.equal(receiptCopies[0].reply_to_message_id, confirmedTextMsgs[0].message_id);
-    assert.match(receiptCopies[0].caption, /🧾 Payment Receipt: bank receipt • #INV0001/);
-    assert.match(receiptCopies[0].caption, /💵 Amount Received: ₩150,000/);
-
-    // Confirmation text in Confirmed edited to link directly to receipt message
-    const confirmedEdits = editedTexts.filter(
-      (e) => e.message_id === confirmedTextMsgs[0].message_id
-    );
-    assert.equal(confirmedEdits.length, 1);
-    assert.match(confirmedEdits[0].text, /🧾 Receipt: \[View payment receipt\]/);
+    assert.match(confirmedTextMsgs[0].text, /🧾 Receipt: \[View payment receipt\]/);
 
     // Payment ledger entry
     const payments = await txRepo.getPayments(1);

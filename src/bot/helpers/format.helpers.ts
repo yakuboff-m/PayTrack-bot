@@ -761,6 +761,7 @@ export function formatConfirmedHeader(
     originalAmount?: number | null;
     additionsTotal?: number | null;
     bankDetails?: string | null;
+    accountHolder?: string | null;
     receiptUrl?: string | null;
   }
 ): string {
@@ -771,14 +772,29 @@ export function formatConfirmedHeader(
   } else {
     lines.push(invoiceId ? `✅ PAID • ${formatInvoiceId(invoiceId)}` : '✅ PAID');
   }
+  lines.push('━━━━━━━━━━━━');
   lines.push('');
   lines.push(`🏢 ${distributorName ?? 'Not specified'}`);
   if (paymentDetails?.bankDetails) {
-    lines.push(`🏦 ${paymentDetails.bankDetails}`);
+    const bankStr =
+      paymentDetails.bankDetails.startsWith('💳') || paymentDetails.bankDetails.startsWith('🏦')
+        ? paymentDetails.bankDetails
+        : `💳 ${paymentDetails.bankDetails}`;
+    lines.push(bankStr);
+  }
+  if (
+    paymentDetails?.accountHolder &&
+    (!paymentDetails.bankDetails || !paymentDetails.bankDetails.includes(paymentDetails.accountHolder))
+  ) {
+    const holderStr = paymentDetails.accountHolder.startsWith('👤')
+      ? paymentDetails.accountHolder
+      : `👤 ${paymentDetails.accountHolder}`;
+    lines.push(holderStr);
   }
 
   // Invoice amounts breakdown
   if (paymentDetails?.originalAmount !== undefined && paymentDetails.originalAmount !== null) {
+    lines.push('');
     lines.push(`📥 Original Invoice: ${formatAmount(paymentDetails.originalAmount)}`);
   }
   if (
@@ -786,9 +802,18 @@ export function formatConfirmedHeader(
     paymentDetails.additionsTotal !== null &&
     paymentDetails.additionsTotal > 0
   ) {
+    if (paymentDetails.originalAmount === undefined || paymentDetails.originalAmount === null) {
+      lines.push('');
+    }
     lines.push(`➕ Total Added: ${formatAmount(paymentDetails.additionsTotal)}`);
   }
   if (amount !== null) {
+    if (
+      (paymentDetails?.originalAmount === undefined || paymentDetails.originalAmount === null) &&
+      (!paymentDetails?.additionsTotal || paymentDetails.additionsTotal <= 0)
+    ) {
+      lines.push('');
+    }
     if (paymentDetails?.additionsTotal && paymentDetails.additionsTotal > 0) {
       lines.push(`💰 Updated Total: ${formatAmount(amount)}`);
     } else {
@@ -827,6 +852,7 @@ export function formatConfirmedHeader(
   if (paymentDetails?.receiptUrl) {
     lines.push('');
     lines.push(`🧾 Receipt: [View payment receipt](${paymentDetails.receiptUrl})`);
+    lines.push(`└─> 🔗 ${paymentDetails.receiptUrl}`);
   }
 
   lines.push('━━━━━━━━━━━━');

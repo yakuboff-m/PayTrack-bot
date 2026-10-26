@@ -408,7 +408,7 @@ describe('Critical Transaction Workflow Audit & Repair Regression Suite', () => 
   // 5. Receipt with /paid in caption is not duplicated & cleaned from Pending
   // ─────────────────────────────────────────────────────────────
   it('Scenario 5: Receipt with /paid in caption is copied once to Confirmed and cleaned up from Pending', async () => {
-    const { bot, txRepo, txService, distService, distributor, copiedMessages, deletedMessageIds } =
+    const { bot, txRepo, txService, distService, distributor, copiedMessages, sentMessages, deletedMessageIds } =
       await setupTestContext();
 
     const tx = await txService.registerTransaction(
@@ -444,7 +444,11 @@ describe('Critical Transaction Workflow Audit & Repair Regression Suite', () => 
     assert.equal(copiedMessages.length, 1);
     assert.equal(copiedMessages[0].message_thread_id, testConfig.confirmedTopicId);
     assert.equal(copiedMessages[0].from_message_id, 206);
-    assert.match(copiedMessages[0].caption, /🧾 Payment Receipt: KakaoPay transfer receipt/);
+
+    // Visible text confirmation message in Confirmed topic contains note
+    const confirmedText = sentMessages.find((m) => m.message_thread_id === testConfig.confirmedTopicId);
+    assert.ok(confirmedText, 'Visible text confirmation message sent to Confirmed topic');
+    assert.match(confirmedText.text, /KakaoPay transfer receipt/);
 
     // Original receipt in Pending (206) was deleted
     assert.equal(deletedMessageIds.includes(206), true);
@@ -584,8 +588,8 @@ describe('Critical Transaction Workflow Audit & Repair Regression Suite', () => 
   // ─────────────────────────────────────────────────────────────
   // 8. Confirmed layout preservation (album for photo+photo)
   // ─────────────────────────────────────────────────────────────
-  it('Scenario 8: Confirmed layout sends media group album when invoice and receipt are both photos', async () => {
-    const { bot, txRepo, txService, distService, distributor, sentMediaGroups } = await setupTestContext();
+  it('Scenario 8: Confirmed layout sends separate text message and preserved media copies', async () => {
+    const { bot, txRepo, txService, distService, distributor, sentMessages, copiedMessages } = await setupTestContext();
 
     const tx = await txService.registerTransaction(
       String(testConfig.telegramGroupId),
@@ -617,13 +621,16 @@ describe('Critical Transaction Workflow Audit & Repair Regression Suite', () => 
       },
     } as any);
 
-    assert.equal(sentMediaGroups.length, 1);
-    const album = sentMediaGroups[0];
-    assert.equal(album.message_thread_id, testConfig.confirmedTopicId);
-    assert.equal(album.media.length, 2);
-    assert.match(album.media[0].caption, /✅ PAID/);
-    assert.match(album.media[0].caption, /Meat invoice #108 delivery/);
-    assert.match(album.media[1].caption, /🧾 Payment Receipt: Paid in full via bank transfer/);
+    const confirmedText = sentMessages.find((m) => m.message_thread_id === testConfig.confirmedTopicId);
+    assert.ok(confirmedText, 'Visible text confirmation message sent to Confirmed topic');
+    assert.match(confirmedText.text, /✅ PAID/);
+
+    const copiedInvoice = copiedMessages.find((c) => c.from_message_id === 108 && c.message_thread_id === testConfig.confirmedTopicId);
+    assert.ok(copiedInvoice, 'Original invoice media copied to Confirmed');
+    assert.equal(copiedInvoice.caption, undefined, 'Preserves original media without overwriting caption');
+
+    const copiedReceipt = copiedMessages.find((c) => c.from_message_id === 209 && c.message_thread_id === testConfig.confirmedTopicId);
+    assert.ok(copiedReceipt, 'Receipt media copied to Confirmed');
   });
 
   // ─────────────────────────────────────────────────────────────

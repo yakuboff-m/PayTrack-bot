@@ -705,261 +705,144 @@ export class TransactionService {
       // Distributor bank details
       let bankDetails: string | null = null;
       if (
-        transaction.distributorSnapshot?.bankName &&
+        transaction.distributorSnapshot?.bankName ||
         transaction.distributorSnapshot?.accountNumber
       ) {
-        bankDetails = `${transaction.distributorSnapshot.bankName} ${transaction.distributorSnapshot.accountNumber}`;
-        if (transaction.distributorSnapshot.accountHolder) {
-          bankDetails += ` (${transaction.distributorSnapshot.accountHolder})`;
-        }
+        bankDetails = [
+          transaction.distributorSnapshot?.bankName,
+          transaction.distributorSnapshot?.accountNumber,
+        ]
+          .filter(Boolean)
+          .join(' ');
       }
-
-      // ── Phase 1: Create confirmation in Confirmed topic ────
-      const headerText = formatConfirmedHeader(
-        distributorName,
-        transaction.amount,
-        transaction.receivedAt,
-        paidAt,
-        transaction.id,
-        effectiveNote,
-        transaction.notes,
-        {
-          status: newStatus,
-          paymentAmount: payAmount,
-          cumulativePaid,
-          remainingBalance,
-          originalAmount,
-          additionsTotal,
-          bankDetails,
-        }
-      );
-
-      const receiptCaption = formatReceiptCaption({
-        invoiceId: transaction.id,
-        distributorName,
-        bankDetails,
-        originalAmount,
-        additionsTotal,
-        currentInvoiceTotal: transaction.amount,
-        paymentAmount: payAmount,
-        cumulativePaid,
-        remainingBalance,
-        status: newStatus,
-        paidAt,
-        note: effectiveNote,
-      });
-
-      // Extract original invoice content (preserving item breakdown, text, or captions)
-      const invoiceRawText = invoiceMsg?.text ?? invoiceMsg?.caption ?? '';
-      const { original: extractedOriginal } = splitOriginalAndMetadata(invoiceRawText);
-      const originalInvoiceContent = extractedOriginal.trim() || invoiceRawText.trim();
-
-      // Combined text for Confirmed topic: PAID header + blank line + original invoice content
-      const combinedConfirmedText = formatConfirmedInvoiceContent(
-        headerText,
-        originalInvoiceContent
-      );
+      const accountHolder = transaction.distributorSnapshot?.accountHolder ?? null;
 
       // Extract file IDs from invoice and payment media
       const invoicePhoto =
         invoiceMsg?.photo && invoiceMsg.photo.length > 0
           ? invoiceMsg.photo[invoiceMsg.photo.length - 1].file_id
           : null;
-      const paymentPhoto =
-        paymentEvidenceMsg?.photo && paymentEvidenceMsg.photo.length > 0
-          ? paymentEvidenceMsg.photo[paymentEvidenceMsg.photo.length - 1].file_id
-          : null;
-
       const invoiceDoc = invoiceMsg?.document?.file_id ?? null;
-      const paymentDoc = paymentEvidenceMsg?.document?.file_id ?? null;
 
+      // ── Phase 1: Create confirmation in Confirmed topic ────
       const isSubsequentPayment = previousTotalPaid > 0 || !!transaction.confirmationMessageId;
       let effectiveReceiptMsgId: number | null = null;
+      let confirmedInvoiceCopyMsgId: number | null = null;
+
       try {
-        if (isSubsequentPayment) {
-          // SUBSEQUENT PAYMENT: Do not create redundant copies of the invoice message in Confirmed.
-          // Post the receipt media with receiptCaption containing full financial context, replying to the primary confirmation.
-          const replyToId = transaction.confirmationMessageId ?? undefined;
-          if (paymentEvidenceMsg && paymentEvidenceMsg.message_id !== invoiceMessageId && (paymentPhoto || paymentDoc)) {
+        // Step 1: Copy original invoice media into Confirmed topic (on first payment only)
+        const hasInvoiceMedia = Boolean(
+          invoicePhoto ||
+          invoiceDoc ||
+          (transaction.mediaFileId && transaction.mediaType !== 'text') ||
+          (invoiceMsg && (invoiceMsg.photo || invoiceMsg.document))
+        );
+        if (!isSubsequentPayment && invoiceMessageId && hasInvoiceMedia) {
+          try {
+            const copiedInvoice = await api.copyMessage(chatId, chatId, invoiceMessageId, {
+              message_thread_id: config.confirmedTopicId,
+            });
+            confirmedInvoiceCopyMsgId = copiedInvoice.message_id;
+            additionalConfirmedMsgIds.push(copiedInvoice.message_id);
+          } catch {
+            // Best-effort fallback if copyMessage fails (e.g. if original message was deleted)
+            if (invoicePhoto) {
+              const sent = await api.sendPhoto(chatId, invoicePhoto, {
+                message_thread_id: config.confirmedTopicId,
+              });
+              confirmedInvoiceCopyMsgId = sent.message_id;
+              additionalConfirmedMsgIds.push(sent.message_id);
+            } else if (invoiceDoc) {
+              const sent = await api.sendDocument(chatId, invoiceDoc, {
+                message_thread_id: config.confirmedTopicId,
+              });
+              confirmedInvoiceCopyMsgId = sent.message_id;
+              additionalConfirmedMsgIds.push(sent.message_id);
+            }
+          }
+        }
+
+        // Step 2: Copy payment receipt media into Confirmed as a separate media message, preserving original content
+        const replyToTargetId = isSubsequentPayment
+          ? (transaction.confirmationMessageId ?? undefined)
+          : (confirmedInvoiceCopyMsgId ?? undefined);
+
+        if (paymentEvidenceMsg && paymentEvidenceMsg.message_id !== invoiceMessageId) {
+          const hasEvidenceMedia =
+            (paymentEvidenceMsg.photo && paymentEvidenceMsg.photo.length > 0) ||
+            !!paymentEvidenceMsg.document;
+          const isDistinctReceiptMsg =
+            paymentEvidenceMsg.message_id !== commandMessageId &&
+            Boolean(paymentEvidenceMsg.text || paymentEvidenceMsg.caption);
+
+          if (hasEvidenceMedia || isDistinctReceiptMsg) {
             const copiedEvidence = await api.copyMessage(
               chatId,
               chatId,
               paymentEvidenceMsg.message_id,
               {
                 message_thread_id: config.confirmedTopicId,
-                caption: receiptCaption,
-                ...(replyToId ? { reply_to_message_id: replyToId } : {}),
+                ...(replyToTargetId ? { reply_to_message_id: replyToTargetId } : {}),
               }
             );
-            confirmedMsgId = copiedEvidence.message_id;
             effectiveReceiptMsgId = copiedEvidence.message_id;
-          } else {
-            // Text receipt or text payment command: send confirmation header text replying to primary confirmation
-            const sent = await api.sendMessage(chatId, headerText, {
-              message_thread_id: config.confirmedTopicId,
-              ...(replyToId ? { reply_to_message_id: replyToId } : {}),
-            });
-            confirmedMsgId = sent.message_id;
-            effectiveReceiptMsgId = sent.message_id;
+            additionalConfirmedMsgIds.push(copiedEvidence.message_id);
           }
-        } else if (invoicePhoto && paymentPhoto) {
-          // Both are photos: send TOGETHER as ONE media group (album)
-          const caption =
-            combinedConfirmedText.length <= MAX_CAPTION_LENGTH
-              ? combinedConfirmedText
-              : headerText;
-          const album = await api.sendMediaGroup(
-            chatId,
-            [
-              {
-                type: 'photo',
-                media: invoicePhoto,
-                caption,
-              },
-              {
-                type: 'photo',
-                media: paymentPhoto,
-                caption: receiptCaption,
-              },
-            ],
-            { message_thread_id: config.confirmedTopicId }
-          );
-          confirmedMsgId = album[0].message_id;
-          if (album[1]) {
-            additionalConfirmedMsgIds.push(album[1].message_id);
-            effectiveReceiptMsgId = album[1].message_id;
-          }
+        }
 
-          if (combinedConfirmedText.length > MAX_CAPTION_LENGTH && originalInvoiceContent) {
-            const chunks = splitTextMessage(originalInvoiceContent, MAX_TEXT_LENGTH);
-            for (const chunk of chunks) {
-              const followUp = await api.sendMessage(chatId, chunk, {
-                message_thread_id: config.confirmedTopicId,
-              });
-              additionalConfirmedMsgIds.push(followUp.message_id);
-            }
-          }
-        } else if (invoiceDoc && paymentDoc) {
-          // Both are documents: send TOGETHER as ONE media group
-          const caption =
-            combinedConfirmedText.length <= MAX_CAPTION_LENGTH
-              ? combinedConfirmedText
-              : headerText;
-          const album = await api.sendMediaGroup(
-            chatId,
-            [
-              {
-                type: 'document',
-                media: invoiceDoc,
-                caption,
-              },
-              {
-                type: 'document',
-                media: paymentDoc,
-                caption: receiptCaption,
-              },
-            ],
-            { message_thread_id: config.confirmedTopicId }
-          );
-          confirmedMsgId = album[0].message_id;
-          if (album[1]) {
-            additionalConfirmedMsgIds.push(album[1].message_id);
-            effectiveReceiptMsgId = album[1].message_id;
-          }
+        // Step 3: Determine the clickable receipt link
+        const receiptUrl = effectiveReceiptMsgId
+          ? buildMessageLink(chatId, effectiveReceiptMsgId)
+          : undefined;
 
-          if (combinedConfirmedText.length > MAX_CAPTION_LENGTH && originalInvoiceContent) {
-            const chunks = splitTextMessage(originalInvoiceContent, MAX_TEXT_LENGTH);
-            for (const chunk of chunks) {
-              const followUp = await api.sendMessage(chatId, chunk, {
-                message_thread_id: config.confirmedTopicId,
-              });
-              additionalConfirmedMsgIds.push(followUp.message_id);
-            }
+        // Step 4: Build complete visible confirmation text
+        const confirmationText = formatConfirmedHeader(
+          distributorName,
+          transaction.amount,
+          transaction.receivedAt,
+          paidAt,
+          transaction.id,
+          effectiveNote,
+          transaction.notes,
+          {
+            status: newStatus,
+            paymentAmount: payAmount,
+            cumulativePaid,
+            remainingBalance,
+            originalAmount,
+            additionsTotal,
+            bankDetails,
+            accountHolder,
+            receiptUrl,
           }
-        } else if (!invoicePhoto && !invoiceDoc) {
-          // Plain text invoice: split cleanly if over MAX_TEXT_LENGTH without dropping content
-          const chunks = splitTextMessage(combinedConfirmedText, MAX_TEXT_LENGTH);
-          const sent = await api.sendMessage(chatId, chunks[0], {
+        );
+
+        // For plain text invoices, combine with original invoice content
+        const invoiceRawText = invoiceMsg?.text ?? invoiceMsg?.caption ?? '';
+        const { original: extractedOriginal } = splitOriginalAndMetadata(invoiceRawText);
+        const originalInvoiceContent = extractedOriginal.trim() || invoiceRawText.trim();
+        const isMediaInvoice = Boolean(invoicePhoto || invoiceDoc);
+        let fullConfirmationText = confirmationText;
+        if (!isMediaInvoice && originalInvoiceContent) {
+          fullConfirmationText = formatConfirmedInvoiceContent(
+            confirmationText,
+            originalInvoiceContent
+          );
+        }
+
+        // Step 5: Send a separate, ordinary text message to the Confirmed topic (splitting if necessary)
+        const chunks = splitTextMessage(fullConfirmationText, MAX_TEXT_LENGTH);
+        const sentConfirmation = await api.sendMessage(chatId, chunks[0], {
+          message_thread_id: config.confirmedTopicId,
+          ...(replyToTargetId ? { reply_to_message_id: replyToTargetId } : {}),
+        });
+        confirmedMsgId = sentConfirmation.message_id;
+
+        for (const chunk of chunks.slice(1)) {
+          const followUp = await api.sendMessage(chatId, chunk, {
             message_thread_id: config.confirmedTopicId,
           });
-          confirmedMsgId = sent.message_id;
-
-          for (const chunk of chunks.slice(1)) {
-            const followUp = await api.sendMessage(chatId, chunk, {
-              message_thread_id: config.confirmedTopicId,
-            });
-            additionalConfirmedMsgIds.push(followUp.message_id);
-          }
-
-          // If there is payment evidence (photo, doc, or text receipt), copy it into Confirmed
-          if (paymentEvidenceMsg && paymentEvidenceMsg.message_id !== invoiceMessageId) {
-            if (paymentPhoto || paymentDoc) {
-              const copied = await api.copyMessage(chatId, chatId, paymentEvidenceMsg.message_id, {
-                message_thread_id: config.confirmedTopicId,
-                caption: receiptCaption,
-                reply_to_message_id: confirmedMsgId,
-              });
-              additionalConfirmedMsgIds.push(copied.message_id);
-              effectiveReceiptMsgId = copied.message_id;
-            } else {
-              const copied = await api.copyMessage(chatId, chatId, paymentEvidenceMsg.message_id, {
-                message_thread_id: config.confirmedTopicId,
-                reply_to_message_id: confirmedMsgId,
-              });
-              additionalConfirmedMsgIds.push(copied.message_id);
-              effectiveReceiptMsgId = copied.message_id;
-            }
-          }
-        } else {
-          // Single media invoice (photo/doc invoice without matched media payment group)
-          const caption =
-            combinedConfirmedText.length <= MAX_CAPTION_LENGTH
-              ? combinedConfirmedText
-              : headerText;
-          const copied = await api.copyMessage(chatId, chatId, invoiceMessageId, {
-            message_thread_id: config.confirmedTopicId,
-            caption,
-          });
-          confirmedMsgId = copied.message_id;
-
-          if (combinedConfirmedText.length > MAX_CAPTION_LENGTH && originalInvoiceContent) {
-            const chunks = splitTextMessage(originalInvoiceContent, MAX_TEXT_LENGTH);
-            for (const chunk of chunks) {
-              const followUp = await api.sendMessage(chatId, chunk, {
-                message_thread_id: config.confirmedTopicId,
-              });
-              additionalConfirmedMsgIds.push(followUp.message_id);
-            }
-          }
-
-          if (paymentEvidenceMsg && paymentEvidenceMsg.message_id !== invoiceMessageId) {
-            if (paymentPhoto || paymentDoc) {
-              const copiedEvidence = await api.copyMessage(
-                chatId,
-                chatId,
-                paymentEvidenceMsg.message_id,
-                {
-                  message_thread_id: config.confirmedTopicId,
-                  caption: receiptCaption,
-                  reply_to_message_id: confirmedMsgId,
-                }
-              );
-              additionalConfirmedMsgIds.push(copiedEvidence.message_id);
-              effectiveReceiptMsgId = copiedEvidence.message_id;
-            } else {
-              const copiedEvidence = await api.copyMessage(
-                chatId,
-                chatId,
-                paymentEvidenceMsg.message_id,
-                {
-                  message_thread_id: config.confirmedTopicId,
-                  reply_to_message_id: confirmedMsgId,
-                }
-              );
-              additionalConfirmedMsgIds.push(copiedEvidence.message_id);
-              effectiveReceiptMsgId = copiedEvidence.message_id;
-            }
-          }
+          additionalConfirmedMsgIds.push(followUp.message_id);
         }
       } catch (err: unknown) {
         await rollbackAllCreatedMessages();
@@ -977,51 +860,6 @@ export class TransactionService {
       const receiptUrl = effectiveReceiptMsgId
         ? buildMessageLink(chatId, effectiveReceiptMsgId)
         : confirmationUrl;
-
-      // When confirmation and receipt are separate messages, edit confirmation header to link directly to receipt
-      if (effectiveReceiptMsgId && effectiveReceiptMsgId !== confirmedMsgId && !isSubsequentPayment) {
-        const linkedHeaderText = formatConfirmedHeader(
-          distributorName,
-          transaction.amount,
-          transaction.receivedAt,
-          paidAt,
-          transaction.id,
-          effectiveNote,
-          transaction.notes,
-          {
-            status: newStatus,
-            paymentAmount: payAmount,
-            cumulativePaid,
-            remainingBalance,
-            originalAmount,
-            additionsTotal,
-            bankDetails,
-            receiptUrl,
-          }
-        );
-        try {
-          if (!invoicePhoto && !invoiceDoc) {
-            const linkedCombined = formatConfirmedInvoiceContent(
-              linkedHeaderText,
-              originalInvoiceContent
-            );
-            await api.editMessageText(
-              chatId,
-              confirmedMsgId,
-              linkedCombined.length <= MAX_TEXT_LENGTH ? linkedCombined : linkedHeaderText
-            );
-          } else {
-            await api.editMessageCaption(chatId, confirmedMsgId, {
-              caption:
-                linkedHeaderText.length <= MAX_CAPTION_LENGTH
-                  ? linkedHeaderText
-                  : linkedHeaderText.slice(0, MAX_CAPTION_LENGTH),
-            });
-          }
-        } catch {
-          /* best effort link update */
-        }
-      }
 
       // ── Phase 2: Record Payment in DB ────────────────────
       if (typeof this.repo.recordPayment === 'function') {

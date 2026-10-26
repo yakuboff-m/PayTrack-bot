@@ -106,7 +106,7 @@ async function setupTestContext() {
 
     if (method === 'copyMessage') {
       const id = 9000 + copiedMessages.length;
-      copiedMessages.push({ ...payload, message_id: id });
+      copiedMessages.push({ ...payload, from_message_id: payload.message_id, message_id: id });
       return {
         ok: true,
         result: {
@@ -666,11 +666,19 @@ describe('Invoice Caption, Amount Breakdown, and Append-Only Action History', ()
       },
     } as any);
 
-    // Confirmed topic must receive media group album containing both invoice and receipt photo
-    assert.equal(ctx.sentMediaGroups.length, 1);
-    const album = ctx.sentMediaGroups[0];
-    assert.equal(album.media.length, 2);
-    assert.equal(album.media[0].media, 'invoice_photo_1201');
-    assert.equal(album.media[1].media, 'receipt_photo_1210');
+    // Confirmed topic must receive preserved invoice copy, receipt copy, and visible text confirmation
+    const invoiceCopy = ctx.copiedMessages.find(
+      (c: any) => c.from_message_id === 1201 && c.message_thread_id === testConfig.confirmedTopicId
+    );
+    assert.ok(invoiceCopy, 'Invoice photo copied to Confirmed');
+    const receiptCopy = ctx.copiedMessages.find(
+      (c: any) => c.from_message_id === 1210 && c.message_thread_id === testConfig.confirmedTopicId
+    );
+    assert.ok(receiptCopy, 'Receipt photo copied to Confirmed');
+    const confirmedText = ctx.sentMessages.find(
+      (m: any) => m.message_thread_id === testConfig.confirmedTopicId
+    );
+    assert.ok(confirmedText, 'Visible text confirmation sent to Confirmed');
+    assert.match(confirmedText.text, /✅ PAID/);
   });
 });

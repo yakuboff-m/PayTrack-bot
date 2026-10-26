@@ -240,6 +240,7 @@ describe('Regression: /paid with Receipt Image and #INV0009', () => {
         distributor,
         sentMediaGroups,
         sentMessages,
+        copiedMessages,
         deletedMessageIds,
         editedCaptions,
       } = await setupTestContext();
@@ -318,14 +319,21 @@ describe('Regression: /paid with Receipt Image and #INV0009', () => {
       assert.equal(updatedTx.status, 'PAID');
       assert.ok(updatedTx.paid_at);
 
-      // Verify media group album was sent to Confirmed topic with both invoice and receipt photos
-      assert.equal(sentMediaGroups.length, 1);
-      const mediaGroup = sentMediaGroups[0];
-      assert.equal(mediaGroup.message_thread_id, testConfig.confirmedTopicId);
-      assert.equal(mediaGroup.media.length, 2);
-      assert.equal(mediaGroup.media[0].media, 'invoice_large_id');
-      assert.equal(mediaGroup.media[1].media, 'receipt_large_id');
-      assert.match(mediaGroup.media[0].caption, /#INV0009/);
+      // Verify visible text confirmation was sent to Confirmed topic
+      const confirmedText = sentMessages.find((m) => m.message_thread_id === testConfig.confirmedTopicId);
+      assert.ok(confirmedText);
+      assert.match(confirmedText.text, /#INV0009/);
+      assert.match(confirmedText.text, /✅ PAID/);
+
+      // Verify invoice and receipt were copied to Confirmed
+      const invoiceCopy = copiedMessages.find(
+        (c) => c.from_message_id === 5009 && c.message_thread_id === testConfig.confirmedTopicId
+      );
+      assert.ok(invoiceCopy, 'Invoice must be copied to Confirmed');
+      const receiptCopy = copiedMessages.find(
+        (c) => c.from_message_id === 2001 && c.message_thread_id === testConfig.confirmedTopicId
+      );
+      assert.ok(receiptCopy, 'Receipt must be copied to Confirmed');
 
       // Verify error was not returned
       const errorMsg = sentMessages.find((m) => typeof m.text === 'string' && m.text.includes('Invalid payment confirmation'));
@@ -418,7 +426,9 @@ describe('Regression: /paid with Receipt Image and #INV0009', () => {
         (m) => typeof m.text === 'string' && m.text.includes('Invalid payment confirmation')
       );
       assert.equal(errorMsg, undefined, 'Must not return "Invalid payment confirmation"');
-      assert.equal(sentMediaGroups.length, 1);
+      const confirmedText = sentMessages.find((m) => m.message_thread_id === testConfig.confirmedTopicId);
+      assert.ok(confirmedText);
+      assert.match(confirmedText.text, /#INV0009/);
     });
 
     it('auto-recovers and confirms #INV0009 when replying with /paid even if transaction was not present in database', async () => {
@@ -476,7 +486,9 @@ describe('Regression: /paid with Receipt Image and #INV0009', () => {
         (m) => typeof m.text === 'string' && m.text.includes('Invalid payment confirmation')
       );
       assert.equal(errorMsg, undefined, 'Must not return "Invalid payment confirmation"');
-      assert.equal(sentMediaGroups.length, 1);
+      const confirmedText = sentMessages.find((m) => m.message_thread_id === testConfig.confirmedTopicId);
+      assert.ok(confirmedText);
+      assert.match(confirmedText.text, /#INV0009/);
     });
 
     it('removes copy button and cleans invoice caption preserving invoice ID and status when Telegram deleteMessage fails on older invoice', async () => {
@@ -881,7 +893,6 @@ describe('Regression: /paid with Receipt Image and #INV0009', () => {
         (c) => c.from_message_id === 602 && c.message_thread_id === testConfig.confirmedTopicId
       );
       assert.ok(confirmedReceiptCopy, 'Confirmed topic must have copied receipt');
-      assert.match(confirmedReceiptCopy.caption, /🧾 Payment Receipt: KakaoPay transfer/);
 
       // 3. Invoice message in Pending is retained (not deleted), original receipt in Pending is cleaned up
       assert.equal(deletedMessageIds.includes(502), false, 'Invoice message must not be deleted');
@@ -941,20 +952,17 @@ describe('Regression: /paid with Receipt Image and #INV0009', () => {
 
       await bot.handleUpdate(paymentUpdate as any);
 
-      // Media copied to Confirmed and Pending (invoice to Confirmed, doc receipt to Confirmed & Pending)
       assert.equal(copiedMessages.length, 2, 'Should copy photo invoice and document receipt to Confirmed');
       const invoiceCopy = copiedMessages.find(
         (c) => c.from_message_id === 503 && c.message_thread_id === testConfig.confirmedTopicId
       );
       assert.ok(invoiceCopy);
-      assert.match(invoiceCopy.caption, /✅ PAID/);
-      assert.match(invoiceCopy.caption, /Meat delivery batch #777 photo/);
+      assert.equal(invoiceCopy.caption, undefined, 'Preserves original media without caption overwrite');
 
       const docConfirmedCopy = copiedMessages.find(
         (c) => c.from_message_id === 603 && c.message_thread_id === testConfig.confirmedTopicId
       );
       assert.ok(docConfirmedCopy, 'Document receipt must be copied to Confirmed');
-      assert.match(docConfirmedCopy.caption, /🧾 Payment Receipt/);
 
       // Pending message retained and edited; receipt cleaned up
       assert.equal(deletedMessageIds.includes(503), false);
@@ -1222,6 +1230,7 @@ describe('Regression: /paid with Receipt Image and #INV0009', () => {
         distributor,
         sentMediaGroups,
         sentMessages,
+        copiedMessages,
       } = await setupTestContext();
 
       const invoiceTx = await txService.registerTransaction(
@@ -1266,25 +1275,18 @@ describe('Regression: /paid with Receipt Image and #INV0009', () => {
 
       await bot.handleUpdate(paymentUpdate as any);
 
-      // Verify media group album was sent to Confirmed topic
-      assert.equal(sentMediaGroups.length, 1);
-      const album = sentMediaGroups[0];
-      assert.equal(album.media.length, 2);
-      // Item 0 has header, caption <= 1024
-      assert.ok(album.media[0].caption.length <= 1024);
-      assert.match(album.media[0].caption, /✅ PAID/);
+      // Verify visible text confirmation was sent to Confirmed topic
+      const confirmedMsgs = sentMessages.filter((m) => m.message_thread_id === testConfig.confirmedTopicId);
+      assert.ok(confirmedMsgs.length >= 1);
+      assert.match(confirmedMsgs[0].text, /✅ PAID/);
+      assert.match(confirmedMsgs[0].text, /#INV0001/);
 
-      // Item 1 preserves payment evidence caption with invoice details
-      assert.match(album.media[1].caption, /🧾 Payment Receipt: Paid via KakaoPay/);
-      assert.match(album.media[1].caption, /#INV0001/);
-
-      // Overflow message was sent as follow-up in Confirmed topic
-      const followUpMsgs = sentMessages.filter((m) => m.message_thread_id === testConfig.confirmedTopicId);
-      assert.ok(followUpMsgs.length >= 1, 'Follow-up message must be sent with overflow text');
-      const followUpText = followUpMsgs.map((m) => m.text).join('\n');
-      assert.match(followUpText, /1\. Special Item Cut 1/);
-      assert.match(followUpText, /30\. Special Item Cut 30/);
-      assert.match(followUpText, /💰 Total: ₩1,250,000/);
+      // Verify invoice and receipt were copied to Confirmed
+      const invoiceCopy = copiedMessages.find(
+        (c) => c.from_message_id === 508 && c.message_thread_id === testConfig.confirmedTopicId
+      );
+      assert.ok(invoiceCopy);
+      assert.equal(invoiceCopy.caption, undefined, 'Preserves original media without caption overwrite');
     });
 
     it('an explicit-ID command without a reply never overwrites the original text invoice and keeps it intact when content cannot be retrieved', async () => {
