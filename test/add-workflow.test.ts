@@ -155,7 +155,7 @@ async function setupTestContext() {
 }
 
 describe('/add Workflow Regression Suite', () => {
-  it('1. Photo invoice + photo /add: edits primary invoice in place, preserves original media, stores addition separately, deletes admin message', async () => {
+  it('1. Photo invoice + photo /add: creates combined media group with both photos, supersedes old invoice, preserves original media', async () => {
     const ctx = await setupTestContext();
 
     // 1. Initial photo invoice
@@ -192,37 +192,43 @@ describe('/add Workflow Regression Suite', () => {
       },
     } as any);
 
-    // Assert primary invoice message was edited in place via editMessageCaption
-    const editedPrimary = ctx.editedCaptions.find((e) => e.message_id === 501);
-    assert.ok(editedPrimary, 'Primary invoice message (501) must be edited in place');
+    // Assert combined media group was sent containing BOTH original and added photos
+    assert.equal(ctx.sentMediaGroups.length, 1, 'Must send combined media group');
+    const group = ctx.sentMediaGroups[0];
+    assert.equal(group.media.length, 2, 'Combined media group must have 2 photos');
+    assert.equal(group.media[0].media, 'photo_initial_1', 'First photo is original media');
+    assert.equal(group.media[1].media, 'photo_add_1', 'Second photo is added media');
 
-    // Assert no new photo message was sent (original media preserved in place)
-    const newSentPhotos = ctx.sentMessages.filter((m) => m.photo || m.caption);
-    assert.equal(newSentPhotos.length, 0, 'No replacement photo message must be sent when editing in place succeeds');
+    const primaryCaption = group.media[0].caption;
+    assert.ok(primaryCaption);
+    assert.match(primaryCaption, /🧾 INVOICE • #INV0001/);
+    assert.match(primaryCaption, /🏢 Meat Supplier/);
+    assert.match(primaryCaption, /📥 Original Registration:/);
+    assert.match(primaryCaption, /💵 Registered Amount:\n└─> 💰 ₩240,000/);
+    assert.match(primaryCaption, /➕ Invoice Addition/);
+    assert.match(primaryCaption, /💵 Amount Added:\n└─> 💰 ₩230,000/);
+    assert.match(primaryCaption, /📝 Note: Additional ribs/);
+    assert.match(primaryCaption, /💰 Invoice Total: ₩470,000/);
+    assert.match(primaryCaption, /⚖️ Need to Pay: ₩470,000/);
+    assert.match(primaryCaption, /📊 Status: ⏳ PENDING/);
 
-    const caption = editedPrimary.caption;
-    assert.ok(caption);
-    assert.match(caption, /🧾 INVOICE • #INV0001/);
-    assert.match(caption, /🏢 Meat Supplier/);
-    assert.match(caption, /📥 Original Registration:/);
-    assert.match(caption, /💵 Registered Amount:\n└─> 💰 ₩240,000/);
-    assert.match(caption, /➕ Invoice Addition/);
-    assert.match(caption, /💵 Amount Added:\n└─> 💰 ₩230,000/);
-    assert.match(caption, /📝 Note: Additional ribs/);
-    assert.match(caption, /💰 Invoice Total: ₩470,000/);
-    assert.match(caption, /⚖️ Need to Pay: ₩470,000/);
-    assert.match(caption, /📊 Status: ⏳ PENDING/);
+    // Heading appears strictly once
+    const headingMatches = primaryCaption.match(/🧾 INVOICE • #INV0001/g);
+    assert.equal(headingMatches?.length, 1, 'Heading must appear exactly once');
 
-    // Assert Copy Account Number keyboard belongs directly to primary invoice message
-    assert.ok(editedPrimary.reply_markup?.inline_keyboard?.length > 0, 'Keyboard must remain on primary message');
-    assert.equal(editedPrimary.reply_markup.inline_keyboard[0][0].text, 'Copy Account Number');
+    // Assert old invoice message (501) was superseded: notice + link to new invoice (8000) + keyboard removed
+    const editedOld = ctx.editedCaptions.find((e) => e.message_id === 501);
+    assert.ok(editedOld, 'Old invoice message (501) must have superseded caption');
+    assert.match(editedOld.caption, /⚠️ #INV0001 UPDATED/);
+    assert.match(editedOld.caption, /🔗 Updated invoice: <a href="https:\/\/t\.me\/c\/\d+\/8000">Open updated invoice<\/a>/);
+    assert.match(editedOld.caption, /🗑 This message should be deleted manually\./);
+    assert.deepEqual(editedOld.reply_markup?.inline_keyboard, [], 'Keyboard must be removed from old message');
 
     // Assert DB total updated and addition recorded separately
     const updatedTx = (await ctx.txRepo.findById(tx.id))!;
     assert.equal(updatedTx.amount, 470000);
-    assert.equal(updatedTx.metadata_message_id, 501);
-    // Original media is preserved permanently on transaction
-    assert.equal(updatedTx.media_file_id, 'photo_initial_1');
+    assert.equal(updatedTx.metadata_message_id, 8000, 'Primary message ID must be updated to new combined invoice');
+    assert.equal(updatedTx.media_file_id, 'photo_initial_1', 'Original media identity permanently preserved');
     assert.equal(updatedTx.media_type, 'photo');
 
     const additions = await ctx.txRepo.getAdditions(tx.id);
@@ -235,7 +241,7 @@ describe('/add Workflow Regression Suite', () => {
     assert.ok(ctx.deletedMessageIds.includes(601), 'Admin /add message must be deleted');
   });
 
-  it('2. Document invoice + document /add: edits primary document in place and preserves original document', async () => {
+  it('2. Document invoice + document /add: creates combined document media group and supersedes old invoice', async () => {
     const ctx = await setupTestContext();
 
     const tx = await ctx.txService.registerTransaction(
@@ -268,9 +274,19 @@ describe('/add Workflow Regression Suite', () => {
       },
     } as any);
 
-    const editedPrimary = ctx.editedCaptions.find((e) => e.message_id === 502);
-    assert.ok(editedPrimary, 'Primary document message must be edited in place');
-    assert.match(editedPrimary.caption, /💰 Invoice Total: ₩150,000/);
+    // Assert combined document group was sent
+    assert.equal(ctx.sentMediaGroups.length, 1);
+    const group = ctx.sentMediaGroups[0];
+    assert.equal(group.media.length, 2);
+    assert.equal(group.media[0].media, 'doc_initial_1');
+    assert.equal(group.media[1].media, 'doc_add_2');
+    assert.match(group.media[0].caption, /💰 Invoice Total: ₩150,000/);
+
+    // Old document invoice superseded
+    const editedOld = ctx.editedCaptions.find((e) => e.message_id === 502);
+    assert.ok(editedOld);
+    assert.match(editedOld.caption, /⚠️ #INV0001 UPDATED/);
+    assert.deepEqual(editedOld.reply_markup?.inline_keyboard, []);
 
     const updatedTx = (await ctx.txRepo.findById(tx.id))!;
     assert.equal(updatedTx.media_file_id, 'doc_initial_1');
@@ -283,7 +299,7 @@ describe('/add Workflow Regression Suite', () => {
     assert.ok(ctx.deletedMessageIds.includes(602));
   });
 
-  it('3. Mixed media: photo invoice + document /add preserves original photo and stores addition document', async () => {
+  it('3. Mixed media: photo invoice + document /add sends primary photo with full caption and companion document', async () => {
     const ctx = await setupTestContext();
 
     const tx = await ctx.txService.registerTransaction(
@@ -317,10 +333,21 @@ describe('/add Workflow Regression Suite', () => {
       },
     } as any);
 
-    // Primary photo invoice is edited in place
-    const editedPrimary = ctx.editedCaptions.find((e) => e.message_id === 503);
-    assert.ok(editedPrimary, 'Photo invoice message must be edited in place');
-    assert.match(editedPrimary.caption, /💰 Invoice Total: ₩180,000/);
+    // Primary photo invoice sent with original photo and full caption
+    const newPhotos = ctx.sentMessages.filter((m) => m.photo);
+    assert.ok(newPhotos.length >= 1, 'Primary photo must be sent');
+    assert.match(newPhotos[0].caption, /💰 Invoice Total: ₩180,000/);
+
+    // Companion document message sent with addition document
+    const newDocs = ctx.sentMessages.filter((m) => m.document);
+    assert.ok(newDocs.length >= 1, 'Companion document must be sent');
+    assert.equal(newDocs[0].document, 'doc_supplementary');
+
+    // Old photo message (503) superseded
+    const editedOld = ctx.editedCaptions.find((e) => e.message_id === 503);
+    assert.ok(editedOld);
+    assert.match(editedOld.caption, /⚠️ #INV0001 UPDATED/);
+    assert.deepEqual(editedOld.reply_markup?.inline_keyboard, []);
 
     // Original media is preserved as photo
     const updatedTx = (await ctx.txRepo.findById(tx.id))!;
@@ -440,14 +467,17 @@ describe('/add Workflow Regression Suite', () => {
     const totalPaid = await ctx.txRepo.getTotalPaid(tx.id);
     assert.equal(totalPaid, 100000, 'Total paid must remain 100k');
 
-    // Assert edited invoice caption includes partial payment progress
-    const edited = ctx.editedCaptions.find((e) => e.message_id === 505);
-    assert.ok(edited);
-    const caption = edited.caption;
+    // Assert new combined media group contains updated financial progress
+    assert.equal(ctx.sentMediaGroups.length, 1);
+    const caption = ctx.sentMediaGroups[0].media[0].caption;
     assert.match(caption, /💰 Invoice Total: ₩350,000/);
     assert.match(caption, /💵 Total Paid: ₩100,000/);
     assert.match(caption, /⚖️ Need to Pay: ₩250,000/);
-    assert.ok(edited.reply_markup?.inline_keyboard?.length > 0, 'Keyboard attached directly');
+
+    // Assert old message was superseded
+    const edited = ctx.editedCaptions.find((e) => e.message_id === 505);
+    assert.ok(edited);
+    assert.match(edited.caption, /⚠️ #INV0001 UPDATED/);
   });
 
   it('6. Failure safety: Telegram failure preserves source media and reports exact failure step', async () => {
@@ -464,9 +494,10 @@ describe('/add Workflow Regression Suite', () => {
     await ctx.txService.setAmount(tx.id, 100000);
     await ctx.txRepo.updateMetadataMessageId(tx.id, 506);
 
-    // Simulate editMessageCaption and sendPhoto failure
+    // Simulate editMessageCaption, sendPhoto, and sendMediaGroup failure
     ctx.failMethods.add('editMessageCaption');
     ctx.failMethods.add('sendPhoto');
+    ctx.failMethods.add('sendMediaGroup');
 
     await ctx.bot.handleUpdate({
       update_id: 106,
@@ -580,34 +611,36 @@ describe('/add Workflow Regression Suite', () => {
       },
     } as any);
 
-    // 1. Primary invoice message edited in place
-    const editedPrimary = ctx.editedCaptions.find((e) => e.message_id === 901);
-    assert.ok(editedPrimary, 'Primary invoice message must be edited in place');
+    // 1. Primary invoice message created as combined media group with both photos
+    assert.equal(ctx.sentMediaGroups.length, 1, 'Must send combined media group');
+    const group = ctx.sentMediaGroups[0];
+    assert.equal(group.media.length, 2);
+    assert.equal(group.media[0].media, 'photo_invoice_12345_inv0015');
+    assert.equal(group.media[1].media, 'photo_book_cover_inv0015');
 
     // 2. Caption includes invoice identity, distributor, action history, and financial summary
-    assert.match(editedPrimary.caption, /🧾 INVOICE • #INV0001/);
-    assert.match(editedPrimary.caption, /🏢 Koreta/);
-    assert.match(editedPrimary.caption, /💳 Hana Bank 012-345678-2341/);
-    assert.match(editedPrimary.caption, /👤 Koreta CoLtd/);
-    assert.match(editedPrimary.caption, /Original Registration:/);
-    assert.match(editedPrimary.caption, /Registered Amount:\n└─> 💰 ₩450,000/);
-    assert.match(editedPrimary.caption, /Invoice Addition/);
-    assert.match(editedPrimary.caption, /Amount Added:\n└─> 💰 ₩200,000/);
-    assert.match(editedPrimary.caption, /📊 FINANCIAL SUMMARY/);
-    assert.match(editedPrimary.caption, /💰 Invoice Total: ₩650,000/);
-    assert.match(editedPrimary.caption, /💵 Total Paid: ₩0/);
-    assert.match(editedPrimary.caption, /⚖️ Need to Pay: ₩650,000/);
-    assert.match(editedPrimary.caption, /📊 Status: ⏳ PENDING/);
+    const primaryCaption = group.media[0].caption;
+    assert.match(primaryCaption, /🧾 INVOICE • #INV0001/);
+    assert.match(primaryCaption, /🏢 Koreta/);
+    assert.match(primaryCaption, /💳 Hana Bank 012-345678-2341/);
+    assert.match(primaryCaption, /👤 Koreta CoLtd/);
+    assert.match(primaryCaption, /Original Registration:/);
+    assert.match(primaryCaption, /Registered Amount:\n└─> 💰 ₩450,000/);
+    assert.match(primaryCaption, /Invoice Addition/);
+    assert.match(primaryCaption, /Amount Added:\n└─> 💰 ₩200,000/);
+    assert.match(primaryCaption, /📊 FINANCIAL SUMMARY/);
+    assert.match(primaryCaption, /💰 Invoice Total: ₩650,000/);
+    assert.match(primaryCaption, /💵 Total Paid: ₩0/);
+    assert.match(primaryCaption, /⚖️ Need to Pay: ₩650,000/);
+    assert.match(primaryCaption, /📊 Status: ⏳ PENDING/);
 
-    // 3. Inline keyboard includes the Copy Account Number button directly on the primary message
-    assert.ok(editedPrimary.reply_markup?.inline_keyboard?.length > 0, 'Keyboard must be directly on primary message');
-    assert.equal(editedPrimary.reply_markup.inline_keyboard[0][0].text, 'Copy Account Number');
+    // 3. Old message 901 superseded
+    const editedOld = ctx.editedCaptions.find((e) => e.message_id === 901);
+    assert.ok(editedOld, 'Old message 901 must be superseded');
+    assert.match(editedOld.caption, /⚠️ #INV0001 UPDATED/);
+    assert.deepEqual(editedOld.reply_markup?.inline_keyboard, []);
 
-    // 4. No second invoice preview or duplicate bank-information message is sent
-    const textMessages = ctx.sentMessages.filter((m) => m.text && !m.photo && !m.document);
-    assert.equal(textMessages.length, 0, 'No second invoice preview or duplicate bank-info message sent');
-
-    // 5. Database records the invoice correctly
+    // 4. Database records the invoice correctly
     const updatedTx = (await ctx.txRepo.findById(tx.id))!;
     assert.equal(updatedTx.amount, 650000, 'DB invoice total must be 650,000');
     assert.equal(updatedTx.status, 'PENDING');
@@ -618,5 +651,84 @@ describe('/add Workflow Regression Suite', () => {
     assert.equal(additions.length, 1);
     assert.equal(additions[0].amount, 200000);
     assert.equal(additions[0].media_file_id, 'photo_book_cover_inv0015', 'Addition media preserved in additions table');
+  });
+
+  it('8. Critical regression: Register ₩450,000 invoice -> /add 50000 with second photo -> combined media, superseded notice, single heading, ₩500,000 total', async () => {
+    const ctx = await setupTestContext();
+
+    // 1. Register invoice with original media and amount ₩450,000
+    const tx = await ctx.txService.registerTransaction(
+      String(testConfig.telegramGroupId),
+      testConfig.pendingTopicId,
+      701,
+      undefined,
+      'orig_photo_450k',
+      'photo'
+    );
+    const snapshot = ctx.distService.createSnapshot(ctx.distributor);
+    await ctx.txService.assignDistributor(tx.id, ctx.distributor.id, snapshot);
+    await ctx.txService.setAmount(tx.id, 450000);
+    await ctx.txRepo.updateMetadataMessageId(tx.id, 701);
+
+    // 2. Issue /add 50000 with a second invoice media item
+    await ctx.bot.handleUpdate({
+      update_id: 301,
+      message: {
+        message_id: 801,
+        from: { id: 111, is_bot: false },
+        chat: { id: testConfig.telegramGroupId, type: 'supergroup' },
+        message_thread_id: testConfig.pendingTopicId,
+        photo: [{ file_id: 'second_photo_50k' }],
+        caption: '/add 50000 Delivery fee',
+        reply_to_message: {
+          message_id: 701,
+          chat: { id: testConfig.telegramGroupId },
+          message_thread_id: testConfig.pendingTopicId,
+          photo: [{ file_id: 'orig_photo_450k' }],
+          caption: '━━━━━━━━━━━━\n🧾 INVOICE • #INV0001\n━━━━━━━━━━━━\n🏢 Meat Supplier\n💳 Hana Bank 123-456\n👤 Owner\n━━━━━━━━━━━━\n📜 ACTION HISTORY\n━━━━━━━━━━━━\n📥 Original Registration:\n└─> 🕧 2026-10-25 10:00\n💵 Registered Amount:\n└─> 💰 ₩450,000\n━━━━━━━━━━━━\n📊 FINANCIAL SUMMARY\n━━━━━━━━━━━━\n💰 Invoice Total: ₩450,000\n💵 Total Paid: ₩0\n⚖️ Need to Pay: ₩450,000\n📊 Status: ⏳ PENDING',
+        },
+      },
+    } as any);
+
+    // 3. Assert original media remains available
+    const updatedTx = (await ctx.txRepo.findById(tx.id))!;
+    assert.equal(updatedTx.media_file_id, 'orig_photo_450k', 'Original media file ID must remain intact');
+    assert.equal(updatedTx.media_type, 'photo');
+
+    // 4. Assert newly created updated invoice includes both original and added invoice media
+    assert.equal(ctx.sentMediaGroups.length, 1, 'Must send combined media group');
+    const group = ctx.sentMediaGroups[0];
+    assert.equal(group.media.length, 2, 'Combined media group must have 2 media items');
+    assert.equal(group.media[0].media, 'orig_photo_450k', 'First item is original media');
+    assert.equal(group.media[1].media, 'second_photo_50k', 'Second item is added media');
+
+    // 5. Assert updated total is ₩500,000 and action history preserves registration and addition
+    assert.equal(updatedTx.amount, 500000, 'Updated total must be ₩500,000');
+    const additions = await ctx.txRepo.getAdditions(tx.id);
+    assert.equal(additions.length, 1);
+    assert.equal(additions[0].amount, 50000);
+    assert.equal(additions[0].note, 'Delivery fee');
+
+    const primaryCaption = group.media[0].caption;
+    assert.ok(primaryCaption);
+    assert.match(primaryCaption, /📥 Original Registration:/);
+    assert.match(primaryCaption, /💵 Registered Amount:\n└─> 💰 ₩450,000/);
+    assert.match(primaryCaption, /➕ Invoice Addition/);
+    assert.match(primaryCaption, /💵 Amount Added:\n└─> 💰 ₩50,000/);
+    assert.match(primaryCaption, /📝 Note: Delivery fee/);
+    assert.match(primaryCaption, /💰 Invoice Total: ₩500,000/);
+    assert.match(primaryCaption, /⚖️ Need to Pay: ₩500,000/);
+
+    // 6. Assert old message becomes a superseded notice with working link to updated message and no account-copy button
+    const oldEdited = ctx.editedCaptions.find((e) => e.message_id === 701);
+    assert.ok(oldEdited, 'Old message 701 must be edited');
+    assert.match(oldEdited.caption, /⚠️ #INV0001 UPDATED/);
+    assert.match(oldEdited.caption, /🔗 Updated invoice: <a href="https:\/\/t\.me\/c\/\d+\/8000">Open updated invoice<\/a>/);
+    assert.match(oldEdited.caption, /🗑 This message should be deleted manually\./);
+    assert.deepEqual(oldEdited.reply_markup?.inline_keyboard, [], 'Keyboard must be removed from old message');
+
+    // 7. Assert invoice heading occurs exactly once
+    const headingMatches = primaryCaption.match(/🧾 INVOICE • #INV0001/g);
+    assert.equal(headingMatches?.length, 1, 'Invoice heading must appear strictly once in final caption');
   });
 });

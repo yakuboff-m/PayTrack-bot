@@ -26,6 +26,7 @@ import {
   formatSupersededInvoiceCaption,
   formatReceiptCaption,
   parsePaidCommandPayload,
+  formatAmount,
   nowISO,
 } from '../bot/helpers/format.helpers';
 import { copyAccountKeyboard } from '../bot/keyboards/keyboards';
@@ -1458,61 +1459,244 @@ export class TransactionService {
         : undefined;
 
       let newInvoiceMsg: Message;
-      let editSucceeded = false;
-      const isMedia =
-        originalMediaType === 'photo' ||
-        originalMediaType === 'document' ||
-        Boolean(repliedMessage.photo || repliedMessage.document);
+      const hasAddedMedia = Boolean(addPhoto || addDoc);
 
-      // 4. Update the primary invoice message's caption and keyboard in place
-      if (isMedia) {
+      if (hasAddedMedia) {
+        // 4. Create a new combined invoice message containing BOTH original and added media
+        const origFileId = originalMediaFileId ?? repliedPhoto ?? repliedDoc;
+        const origType = originalMediaType ?? (repliedPhoto ? 'photo' : repliedDoc ? 'document' : null);
+
         try {
-          await api.editMessageCaption(chatId, targetMessageId, {
-            caption: safeCaption,
-            reply_markup: keyboard,
-          });
-          editSucceeded = true;
-        } catch (capErr: unknown) {
-          if (isNoTextMessageError(capErr)) {
-            try {
-              await api.editMessageText(chatId, targetMessageId, safeCaption, {
-                reply_markup: keyboard,
-              });
-              editSucceeded = true;
-            } catch {
-              /* fall through to re-send fallback */
+          if (origType === 'photo' && origFileId && addPhoto) {
+            // Photo + Photo: Native Telegram media group
+            const album = await api.sendMediaGroup(
+              chatId,
+              [
+                {
+                  type: 'photo',
+                  media: origFileId,
+                  caption: safeCaption,
+                  parse_mode: 'HTML',
+                },
+                {
+                  type: 'photo',
+                  media: addPhoto,
+                },
+              ],
+              { message_thread_id: pendingTopicId }
+            );
+            newInvoiceMsg = album[0];
+
+            if (keyboard) {
+              try {
+                await api.editMessageReplyMarkup(chatId, newInvoiceMsg.message_id, {
+                  reply_markup: keyboard,
+                });
+              } catch {
+                try {
+                  await api.sendMessage(chatId, `💳 <b>Account details for ${formatInvoiceId(transaction.id)}:</b>`, {
+                    message_thread_id: pendingTopicId,
+                    reply_markup: keyboard,
+                    parse_mode: 'HTML',
+                  });
+                } catch {
+                  /* best effort */
+                }
+              }
             }
-          }
-        }
-      } else {
-        try {
-          await api.editMessageText(chatId, targetMessageId, safeCaption, {
-            reply_markup: keyboard,
-          });
-          editSucceeded = true;
-        } catch (txtErr: unknown) {
-          if (isNoTextMessageError(txtErr)) {
-            try {
-              await api.editMessageCaption(chatId, targetMessageId, {
+          } else if (origType === 'document' && origFileId && addDoc) {
+            // Document + Document: Native Telegram media group
+            const album = await api.sendMediaGroup(
+              chatId,
+              [
+                {
+                  type: 'document',
+                  media: origFileId,
+                  caption: safeCaption,
+                  parse_mode: 'HTML',
+                },
+                {
+                  type: 'document',
+                  media: addDoc,
+                },
+              ],
+              { message_thread_id: pendingTopicId }
+            );
+            newInvoiceMsg = album[0];
+
+            if (keyboard) {
+              try {
+                await api.editMessageReplyMarkup(chatId, newInvoiceMsg.message_id, {
+                  reply_markup: keyboard,
+                });
+              } catch {
+                try {
+                  await api.sendMessage(chatId, `💳 <b>Account details for ${formatInvoiceId(transaction.id)}:</b>`, {
+                    message_thread_id: pendingTopicId,
+                    reply_markup: keyboard,
+                    parse_mode: 'HTML',
+                  });
+                } catch {
+                  /* best effort */
+                }
+              }
+            }
+          } else {
+            // Mixed media types (photo + PDF/document or document + photo) or original text + added media
+            // Telegram cannot mix photo and document in a single sendMediaGroup.
+            // Therefore: Send primary invoice message with original media and full caption & keyboard,
+            // and immediately send additional media as a companion message linked to it.
+            if (origType === 'photo' && origFileId) {
+              newInvoiceMsg = await api.sendPhoto(chatId, origFileId, {
                 caption: safeCaption,
+                message_thread_id: pendingTopicId,
                 reply_markup: keyboard,
+                parse_mode: 'HTML',
               });
-              editSucceeded = true;
-            } catch {
-              /* fall through to re-send fallback */
+            } else if (origType === 'document' && origFileId) {
+              newInvoiceMsg = await api.sendDocument(chatId, origFileId, {
+                caption: safeCaption,
+                message_thread_id: pendingTopicId,
+                reply_markup: keyboard,
+                parse_mode: 'HTML',
+              });
+            } else {
+              // Original had no media, send added media with full caption
+              if (addPhoto) {
+                newInvoiceMsg = await api.sendPhoto(chatId, addPhoto, {
+                  caption: safeCaption,
+                  message_thread_id: pendingTopicId,
+                  reply_markup: keyboard,
+                  parse_mode: 'HTML',
+                });
+              } else if (addDoc) {
+                newInvoiceMsg = await api.sendDocument(chatId, addDoc, {
+                  caption: safeCaption,
+                  message_thread_id: pendingTopicId,
+                  reply_markup: keyboard,
+                  parse_mode: 'HTML',
+                });
+              } else {
+                newInvoiceMsg = await api.sendMessage(chatId, safeCaption, {
+                  message_thread_id: pendingTopicId,
+                  reply_markup: keyboard,
+                  parse_mode: 'HTML',
+                });
+              }
+            }
+
+            // If original media was sent as primary, send added media as linked companion
+            if (origFileId && (addPhoto || addDoc)) {
+              const addNotice = `📎 <b>Additional invoice media for ${formatInvoiceId(transaction.id)}</b> (+${formatAmount(addedAmount)})`;
+              if (addPhoto) {
+                await api.sendPhoto(chatId, addPhoto, {
+                  caption: addNotice,
+                  message_thread_id: pendingTopicId,
+                  reply_to_message_id: newInvoiceMsg.message_id,
+                  parse_mode: 'HTML',
+                });
+              } else if (addDoc) {
+                await api.sendDocument(chatId, addDoc, {
+                  caption: addNotice,
+                  message_thread_id: pendingTopicId,
+                  reply_to_message_id: newInvoiceMsg.message_id,
+                  parse_mode: 'HTML',
+                });
+              }
+            }
+          }
+        } catch (sendErr) {
+          return {
+            success: false,
+            error: `Failed to update invoice message: ${(sendErr as Error).message}`,
+            failedStep: 'create_new_invoice',
+          };
+        }
+
+        // Persist new primary message ID
+        await this.repo.updateMetadataMessageId(transaction.id, newInvoiceMsg.message_id);
+        transaction.metadataMessageId = newInvoiceMsg.message_id;
+
+        // Update old invoice message: remove keyboard and set superseded notice with working link
+        if (targetMessageId !== newInvoiceMsg.message_id) {
+          const updatedInvoiceUrl = buildMessageLink(chatId, newInvoiceMsg.message_id);
+          const supersededCaption = formatSupersededInvoiceCaption(transaction.id, updatedInvoiceUrl);
+          try {
+            const isOldMedia =
+              origType === 'photo' ||
+              origType === 'document' ||
+              Boolean(repliedMessage.photo || repliedMessage.document);
+            if (isOldMedia) {
+              await api.editMessageCaption(chatId, targetMessageId, {
+                caption: supersededCaption,
+                parse_mode: 'HTML',
+                reply_markup: { inline_keyboard: [] },
+              });
+            } else {
+              await api.editMessageText(chatId, targetMessageId, supersededCaption, {
+                parse_mode: 'HTML',
+                reply_markup: { inline_keyboard: [] },
+              });
+            }
+          } catch (err: unknown) {
+            console.warn(`Failed to update superseded invoice message ${targetMessageId}:`, (err as Error).message);
+          }
+        }
+      } else {
+        // No added media provided (/add amount only): Edit existing message in place
+        let editSucceeded = false;
+        const isMedia =
+          originalMediaType === 'photo' ||
+          originalMediaType === 'document' ||
+          Boolean(repliedMessage.photo || repliedMessage.document);
+
+        if (isMedia) {
+          try {
+            await api.editMessageCaption(chatId, targetMessageId, {
+              caption: safeCaption,
+              reply_markup: keyboard,
+            });
+            editSucceeded = true;
+          } catch (capErr: unknown) {
+            if (isNoTextMessageError(capErr)) {
+              try {
+                await api.editMessageText(chatId, targetMessageId, safeCaption, {
+                  reply_markup: keyboard,
+                });
+                editSucceeded = true;
+              } catch {
+                /* fallback to re-send */
+              }
+            }
+          }
+        } else {
+          try {
+            await api.editMessageText(chatId, targetMessageId, safeCaption, {
+              reply_markup: keyboard,
+            });
+            editSucceeded = true;
+          } catch (txtErr: unknown) {
+            if (isNoTextMessageError(txtErr)) {
+              try {
+                await api.editMessageCaption(chatId, targetMessageId, {
+                  caption: safeCaption,
+                  reply_markup: keyboard,
+                });
+                editSucceeded = true;
+              } catch {
+                /* fallback to re-send */
+              }
             }
           }
         }
-      }
 
-      if (editSucceeded) {
-        newInvoiceMsg = {
-          ...repliedMessage,
-          message_id: targetMessageId,
-        } as Message;
-      } else {
-        // Fallback migration strategy: Re-send preserving the ORIGINAL media
-        try {
+        if (editSucceeded) {
+          newInvoiceMsg = {
+            ...repliedMessage,
+            message_id: targetMessageId,
+          } as Message;
+        } else {
+          // Fallback: re-send preserving original media
           if (originalMediaType === 'photo' && originalMediaFileId) {
             newInvoiceMsg = await api.sendPhoto(chatId, originalMediaFileId, {
               caption: safeCaption,
@@ -1531,24 +1715,8 @@ export class TransactionService {
               reply_markup: keyboard,
             });
           }
-
           await this.repo.updateMetadataMessageId(transaction.id, newInvoiceMsg.message_id);
           transaction.metadataMessageId = newInvoiceMsg.message_id;
-
-          // Attempt to delete the old uneditable message
-          if (targetMessageId !== newInvoiceMsg.message_id) {
-            try {
-              await api.deleteMessage(chatId, targetMessageId);
-            } catch {
-              /* best effort */
-            }
-          }
-        } catch (sendErr) {
-          return {
-            success: false,
-            error: `Failed to update invoice message: ${(sendErr as Error).message}`,
-            failedStep: 'create_new_invoice',
-          };
         }
       }
 

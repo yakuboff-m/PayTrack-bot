@@ -334,8 +334,9 @@ export function computeInvoiceFinancialSummary(params: {
 }
 
 /**
- * Strips duplicate total lines from raw user invoice text/breakdown
- * to ensure only the authoritative financial summary displays the invoice total.
+ * Strips duplicate total lines, invoice headers, dividers, distributor details,
+ * action history, and financial summaries from raw text so the authoritative
+ * caption emits each section strictly once.
  */
 export function stripDuplicateTotalLines(text: string): string {
   if (!text) return '';
@@ -343,10 +344,23 @@ export function stripDuplicateTotalLines(text: string): string {
     .split(/\r?\n/)
     .filter((line) => {
       const trimmed = line.trim();
-      if (!trimmed) return true;
+      if (!trimmed) return false;
       if (/^(?:💰\s*)?(?:Grand\s+)?Total:\s*₩?[\d,\s]+/i.test(trimmed)) return false;
-      if (/^(?:🧾\s*)?MEAT INVOICE/i.test(trimmed)) return false;
+      if (/^(?:🧾|🥩|💰)?\s*(?:MEAT\s+)?INVOICE\b/i.test(trimmed)) return false;
+      if (/^#?INV\d+\b/i.test(trimmed)) return false;
       if (/^━+$/.test(trimmed) || /^─+$/.test(trimmed) || /^-+$/.test(trimmed)) return false;
+      if (/^(?:🏢|🏦|💳|👤)/.test(trimmed)) return false;
+      if (/^(?:📜\s*)?ACTION HISTORY/i.test(trimmed)) return false;
+      if (
+        /^(?:📥\s*Original Registration|➕\s*Invoice Addition|➖\s*Partial payment|✅\s*Full payment|📝\s*Note:|💵\s*Registered Amount|💵\s*Amount Added|💵\s*Amount paid|🧾\s*Receipt URL)/i.test(
+          trimmed
+        )
+      )
+        return false;
+      if (/^└─>/.test(trimmed)) return false;
+      if (/^(?:📊\s*)?FINANCIAL SUMMARY/i.test(trimmed)) return false;
+      if (/^(?:💰\s*Invoice Total|💵\s*Total Paid|⚖️\s*Need to Pay|📊\s*Status)/i.test(trimmed))
+        return false;
       return true;
     })
     .join('\n')
@@ -623,13 +637,14 @@ export function formatSupersededInvoiceCaption(
   invoiceId: number,
   updatedInvoiceUrl: string
 ): string {
-  const lines = [
-    `🆔 ${formatInvoiceId(invoiceId)} • 🔄 UPDATED`,
-    `🔗 Updated Invoice: ${updatedInvoiceUrl}`,
+  const invStr = formatInvoiceId(invoiceId);
+  return [
+    `⚠️ ${invStr} UPDATED`,
     '',
-    '⚠️ Should be deleted manually!',
-  ];
-  return lines.join('\n');
+    `🔗 Updated invoice: <a href="${updatedInvoiceUrl}">Open updated invoice</a>`,
+    '',
+    '🗑 This message should be deleted manually.',
+  ].join('\n');
 }
 
 /**
