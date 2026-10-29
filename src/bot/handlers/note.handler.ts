@@ -4,7 +4,7 @@ import { getConfig, type Config } from '../../config/config';
 import { TransactionService } from '../../transactions/transaction.service';
 import { requireAdmin } from '../middleware/auth.middleware';
 import { isReply, getEffectiveRepliedMessage } from '../helpers/telegram.helpers';
-import { nowISO } from '../helpers/format.helpers';
+import { nowISO, isItemizedInvoiceText } from '../helpers/format.helpers';
 import type { InvoiceNote } from '../../types';
 
 export const MAX_NOTE_LENGTH = 1000;
@@ -93,6 +93,12 @@ export function registerNoteHandler(
 
       let updatedTx;
       try {
+        if (!transaction.originalText && !transaction.mediaFileId && isItemizedInvoiceText(repliedMsg.text ?? repliedMsg.caption ?? '')) {
+          const textToSave = (repliedMsg.text ?? repliedMsg.caption ?? '').trim();
+          await transactionService.updateOriginalText(transaction.id, textToSave, 'ITEMIZED_TEXT');
+          transaction.originalText = textToSave;
+          transaction.invoiceType = 'ITEMIZED_TEXT';
+        }
         updatedTx = await transactionService.appendNote(transaction.id, newNote);
       } catch (err: unknown) {
         console.error('Failed to persist note to database:', (err as Error).message);

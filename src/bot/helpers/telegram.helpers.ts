@@ -80,21 +80,33 @@ export function splitOriginalAndMetadata(text: string): {
   original: string;
   metadata: string | null;
 } {
-  // Delimiter for metadata block: METADATA_SEPARATOR on its own line followed by an invoice identifier/field
-  const metadataBlockPattern = /(?:^|\n)(━━━━━━━━━━━━\s*\n(?:🆔|🏢|🏦|💳|👤|💰|📅|📝)[\s\S]*)$/;
-  const match = text.match(metadataBlockPattern);
-  if (match && match.index !== undefined) {
-    const sepIndex = match.index === 0 ? 0 : match.index + 1;
+  if (!text) return { original: '', metadata: null };
+
+  // First, look for ACTION HISTORY separator (common in bot-rendered messages)
+  const actionHistoryPattern = /\n(━━━━━━━━━━━━\s*\n(?:📜\s*)?ACTION HISTORY[\s\S]*)$/i;
+  const ahMatch = text.match(actionHistoryPattern);
+  if (ahMatch && ahMatch.index !== undefined) {
+    const sepIndex = ahMatch.index + 1;
     const original = text.substring(0, sepIndex).trimEnd();
     const metadata = text.substring(sepIndex);
     return { original, metadata };
   }
 
-  // Exact single line of 12 chars (METADATA_SEPARATOR)
-  const exactLinePattern = /(?:^|\n)(━━━━━━━━━━━━)(?:\r?\n|$)/;
+  // Delimiter for metadata block: METADATA_SEPARATOR preceded by newline and followed by an invoice identifier/field
+  const metadataBlockPattern = /\n(━━━━━━━━━━━━\s*\n(?:🆔|🏢|🏦|💳|👤|💰|📅|📝)[\s\S]*)$/;
+  const match = text.match(metadataBlockPattern);
+  if (match && match.index !== undefined) {
+    const sepIndex = match.index + 1;
+    const original = text.substring(0, sepIndex).trimEnd();
+    const metadata = text.substring(sepIndex);
+    return { original, metadata };
+  }
+
+  // Exact single line of 12 chars (METADATA_SEPARATOR) preceded by newline
+  const exactLinePattern = /\n(━━━━━━━━━━━━)(?:\r?\n|$)/;
   const lineMatch = text.match(exactLinePattern);
   if (lineMatch && lineMatch.index !== undefined) {
-    const sepIndex = lineMatch.index === 0 ? 0 : lineMatch.index + 1;
+    const sepIndex = lineMatch.index + 1;
     const original = text.substring(0, sepIndex).trimEnd();
     const metadata = text.substring(sepIndex);
     return { original, metadata };

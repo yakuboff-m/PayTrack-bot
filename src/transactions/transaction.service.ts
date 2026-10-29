@@ -19,6 +19,9 @@ import {
   formatHistoryRecord,
   buildMetadataBlock,
   buildUnifiedInvoiceCaption,
+  buildItemizedTextInvoiceMessage,
+  isItemizedInvoiceText,
+  extractItemizedTextFromMessage,
   computeInvoiceFinancialSummary,
   stripDuplicateTotalLines,
   formatInvoiceId,
@@ -38,6 +41,7 @@ import type {
   ConfirmationResult,
   InvoiceNote,
   TransactionStatus,
+  InvoiceType,
 } from '../types';
 
 export interface ExecuteAddAmountParams {
@@ -120,6 +124,8 @@ export class TransactionService {
       notes: row.notes ? JSON.parse(row.notes) : [],
       mediaFileId: row.media_file_id ?? null,
       mediaType: row.media_type ?? null,
+      invoiceType: (row.invoice_type as InvoiceType) ?? null,
+      originalText: row.original_text ?? null,
       createdAt: row.created_at,
     };
   }
@@ -132,7 +138,9 @@ export class TransactionService {
     messageId: number,
     notes?: InvoiceNote[],
     mediaFileId?: string | null,
-    mediaType?: string | null
+    mediaType?: string | null,
+    invoiceType?: InvoiceType | null,
+    originalText?: string | null
   ): Promise<Transaction> {
     if (
       messageId === topicId ||
@@ -147,7 +155,9 @@ export class TransactionService {
       nowISO(),
       notes && notes.length > 0 ? JSON.stringify(notes) : undefined,
       mediaFileId ?? null,
-      mediaType ?? null
+      mediaType ?? null,
+      invoiceType ?? null,
+      originalText ?? null
     );
     return this.toDomain(row);
   }
@@ -162,6 +172,8 @@ export class TransactionService {
     notes?: InvoiceNote[];
     mediaFileId?: string | null;
     mediaType?: string | null;
+    invoiceType?: InvoiceType | null;
+    originalText?: string | null;
   }): Promise<Transaction> {
     if (
       params.messageId === params.pendingTopicId ||
@@ -180,6 +192,8 @@ export class TransactionService {
       notes: params.notes && params.notes.length > 0 ? JSON.stringify(params.notes) : null,
       mediaFileId: params.mediaFileId ?? null,
       mediaType: params.mediaType ?? null,
+      invoiceType: params.invoiceType ?? null,
+      originalText: params.originalText ?? null,
     });
     return this.toDomain(row);
   }
@@ -291,6 +305,41 @@ export class TransactionService {
       tx.initialAmount ??
       (tx.amount !== null ? Math.max(0, tx.amount - totalAdditions) : null);
 
+    const hasAnyMedia =
+      Boolean(tx.mediaFileId || tx.mediaType) ||
+      additions.some((a) => Boolean(a.media_file_id || a.media_type));
+
+    const isItemized =
+      !hasAnyMedia &&
+      (tx.invoiceType === 'ITEMIZED_TEXT' ||
+        Boolean(tx.originalText) ||
+        Boolean(rawContent && isItemizedInvoiceText(rawContent)));
+
+    if (isItemized) {
+      let origText = tx.originalText;
+      if (!origText && rawContent) {
+        origText = extractItemizedTextFromMessage(rawContent);
+        if (origText) {
+          await this.repo.updateOriginalText(tx.id, origText, 'ITEMIZED_TEXT');
+          tx.originalText = origText;
+          tx.invoiceType = 'ITEMIZED_TEXT';
+        }
+      }
+
+      return buildItemizedTextInvoiceMessage({
+        invoiceId: tx.id,
+        distributor: tx.distributorSnapshot,
+        originalText: origText || rawContent || '',
+        receivedAt: tx.receivedAt,
+        initialAmount,
+        currentAmount: tx.amount,
+        additions: additionsList,
+        payments: paymentsList,
+        notes: tx.notes,
+        hasSeparateAccountControlMessage: Boolean(tx.accountControlMessageId),
+      });
+    }
+
     let cleanItems = '';
     let isMeat = false;
     if (rawContent) {
@@ -312,7 +361,7 @@ export class TransactionService {
       additions: additionsList,
       payments: paymentsList,
       notes: tx.notes,
-      maxCaptionLength: maxLen,
+      maxCaptionLength: hasAnyMedia ? maxLen : MAX_TEXT_LENGTH,
       hasSeparateAccountControlMessage: Boolean(tx.accountControlMessageId),
     });
   }
@@ -451,6 +500,14 @@ export class TransactionService {
     mediaType: string | null
   ): Promise<void> {
     return this.repo.updateMedia(id, mediaFileId, mediaType);
+  }
+
+  async updateOriginalText(
+    id: number,
+    originalText: string,
+    invoiceType?: InvoiceType | null
+  ): Promise<void> {
+    await this.repo.updateOriginalText(id, originalText, invoiceType);
   }
 
   /**
@@ -835,7 +892,9 @@ export class TransactionService {
         // For plain text invoices, combine with original invoice content
         const invoiceRawText = invoiceMsg?.text ?? invoiceMsg?.caption ?? '';
         const { original: extractedOriginal } = splitOriginalAndMetadata(invoiceRawText);
-        const originalInvoiceContent = extractedOriginal.trim() || invoiceRawText.trim();
+        const originalInvoiceContent =
+          transaction.originalText ||
+          (extractedOriginal.trim() || invoiceRawText.trim());
         const isMediaInvoice = Boolean(invoicePhoto || invoiceDoc);
         let fullConfirmationText = confirmationText;
         if (!isMediaInvoice && originalInvoiceContent) {
@@ -1318,24 +1377,56 @@ export class TransactionService {
 
       // Compose caption
       const repliedText = repliedMessage.text ?? repliedMessage.caption ?? '';
-      const { original } = splitOriginalAndMetadata(repliedText);
-      const cleanItems = stripDuplicateTotalLines(original);
-      const isMeat = /MEAT INVOICE/i.test(repliedText);
+      const isItemized =
+        transaction.invoiceType === 'ITEMIZED_TEXT' ||
+        Boolean(transaction.originalText) ||
+        (!isMedia && isItemizedInvoiceText(repliedText));
 
-      const safeCaption = buildUnifiedInvoiceCaption({
-        invoiceId: transaction.id,
-        title: isMeat ? '🥩 MEAT INVOICE' : '🧾 INVOICE',
-        distributor: transaction.distributorSnapshot,
-        itemsBreakdown: cleanItems,
-        receivedAt: transaction.receivedAt,
-        initialAmount,
-        currentAmount: newTotalAmount,
-        additions: additionsList,
-        payments: paymentsList,
-        notes: transaction.notes,
-        maxCaptionLength: MAX_CAPTION_LENGTH,
-        hasSeparateAccountControlMessage: hasAddedMedia ? true : Boolean(transaction.accountControlMessageId),
-      });
+      let safeCaption: string;
+
+      if (isItemized && !hasAddedMedia) {
+        let origText = transaction.originalText;
+        if (!origText) {
+          origText = extractItemizedTextFromMessage(repliedText);
+          if (origText) {
+            await this.repo.updateOriginalText(transaction.id, origText, 'ITEMIZED_TEXT');
+            transaction.originalText = origText;
+            transaction.invoiceType = 'ITEMIZED_TEXT';
+          }
+        }
+
+        safeCaption = buildItemizedTextInvoiceMessage({
+          invoiceId: transaction.id,
+          distributor: transaction.distributorSnapshot,
+          originalText: origText || repliedText,
+          receivedAt: transaction.receivedAt,
+          initialAmount,
+          currentAmount: newTotalAmount,
+          additions: additionsList,
+          payments: paymentsList,
+          notes: transaction.notes,
+          hasSeparateAccountControlMessage: false,
+        });
+      } else {
+        const { original } = splitOriginalAndMetadata(repliedText);
+        const cleanItems = stripDuplicateTotalLines(original);
+        const isMeat = /MEAT INVOICE/i.test(repliedText);
+
+        safeCaption = buildUnifiedInvoiceCaption({
+          invoiceId: transaction.id,
+          title: isMeat ? '🥩 MEAT INVOICE' : '🧾 INVOICE',
+          distributor: transaction.distributorSnapshot,
+          itemsBreakdown: cleanItems,
+          receivedAt: transaction.receivedAt,
+          initialAmount,
+          currentAmount: newTotalAmount,
+          additions: additionsList,
+          payments: paymentsList,
+          notes: transaction.notes,
+          maxCaptionLength: isMedia ? MAX_CAPTION_LENGTH : MAX_TEXT_LENGTH,
+          hasSeparateAccountControlMessage: hasAddedMedia ? true : Boolean(transaction.accountControlMessageId),
+        });
+      }
 
       const targetMessageId = transaction.metadataMessageId ?? repliedMessage.message_id;
       const keyboard = transaction.distributorSnapshot?.accountNumber
@@ -1426,6 +1517,18 @@ export class TransactionService {
               message_thread_id: pendingTopicId,
               parse_mode: 'HTML',
             });
+          }
+
+          if (addPhoto || addDoc) {
+            const newMediaId = addPhoto || addDoc;
+            const newMediaType = addPhoto ? 'photo' : 'document';
+            if (!transaction.mediaFileId) {
+              await this.updateTransactionMedia(transaction.id, newMediaId, newMediaType);
+              await this.repo.updateInvoiceType(transaction.id, 'MEDIA');
+              transaction.mediaFileId = newMediaId;
+              transaction.mediaType = newMediaType;
+              transaction.invoiceType = 'MEDIA';
+            }
           }
 
           // Ensure exactly one current account-control message for the current invoice version
@@ -1579,6 +1682,10 @@ export class TransactionService {
             ...repliedMessage,
             message_id: targetMessageId,
           } as Message;
+          if (!transaction.metadataMessageId) {
+            await this.repo.updateMetadataMessageId(transaction.id, targetMessageId);
+            transaction.metadataMessageId = targetMessageId;
+          }
         } else {
           // Fallback: Re-send preserving the ORIGINAL media
           try {

@@ -4,7 +4,7 @@ import { TransactionService } from '../../transactions/transaction.service';
 import { DistributorService } from '../../distributors/distributor.service';
 import { requireAdmin } from '../middleware/auth.middleware';
 import { getConfig, type Config } from '../../config/config';
-import { parseAmount, formatAmount, formatInvoiceId } from '../helpers/format.helpers';
+import { parseAmount, formatAmount, formatInvoiceId, isItemizedInvoiceText } from '../helpers/format.helpers';
 import { copyAccountKeyboard } from '../keyboards/keyboards';
 import { getEffectiveRepliedMessage, extractMediaInfo } from '../helpers/telegram.helpers';
 import { parseMeatInvoice } from '../../transactions/meat-invoice';
@@ -91,13 +91,21 @@ export function registerAmountHandler(
         let transaction = await transactionService.findByAnyMessageId(chatId, repliedMsg.message_id);
         if (!transaction) {
           try {
+            const isMedia = Boolean(repliedMedia.mediaFileId);
+            const repliedText = repliedMsg.text ?? repliedMsg.caption ?? '';
+            const isItemized = !isMedia && isItemizedInvoiceText(repliedText);
+            const invType = isMedia ? 'MEDIA' : isItemized ? 'ITEMIZED_TEXT' : 'TEXT_STANDARD';
+            const origText = isItemized ? repliedText : undefined;
+
             transaction = await transactionService.registerTransaction(
               chatId,
               config.pendingTopicId,
               repliedMsg.message_id,
               undefined,
               repliedMedia.mediaFileId,
-              repliedMedia.mediaType
+              repliedMedia.mediaType,
+              invType,
+              origText
             );
           } catch {
             await ctx.reply('❌ Could not find or register this transaction.', {
@@ -113,6 +121,13 @@ export function registerAmountHandler(
           );
           transaction.mediaFileId = repliedMedia.mediaFileId;
           transaction.mediaType = repliedMedia.mediaType;
+        }
+
+        if (!transaction.originalText && !transaction.mediaFileId && isItemizedInvoiceText(repliedMsg.text ?? repliedMsg.caption ?? '')) {
+          const textToSave = (repliedMsg.text ?? repliedMsg.caption ?? '').trim();
+          await transactionService.updateOriginalText(transaction.id, textToSave, 'ITEMIZED_TEXT');
+          transaction.originalText = textToSave;
+          transaction.invoiceType = 'ITEMIZED_TEXT';
         }
 
         if (transaction.status !== 'PENDING') {
@@ -197,13 +212,21 @@ export function registerAmountHandler(
         let transaction = await transactionService.findByAnyMessageId(chatId, repliedMsg.message_id);
         if (!transaction) {
           try {
+            const isMedia = Boolean(repliedMedia.mediaFileId);
+            const repliedText = repliedMsg.text ?? repliedMsg.caption ?? '';
+            const isItemized = !isMedia && isItemizedInvoiceText(repliedText);
+            const invType = isMedia ? 'MEDIA' : isItemized ? 'ITEMIZED_TEXT' : 'TEXT_STANDARD';
+            const origText = isItemized ? repliedText : undefined;
+
             transaction = await transactionService.registerTransaction(
               chatId,
               config.pendingTopicId,
               repliedMsg.message_id,
               undefined,
               repliedMedia.mediaFileId,
-              repliedMedia.mediaType
+              repliedMedia.mediaType,
+              invType,
+              origText
             );
           } catch {
             await ctx.reply('❌ Could not find or register this transaction.', {
@@ -219,6 +242,13 @@ export function registerAmountHandler(
           );
           transaction.mediaFileId = repliedMedia.mediaFileId;
           transaction.mediaType = repliedMedia.mediaType;
+        }
+
+        if (!transaction.originalText && !transaction.mediaFileId && isItemizedInvoiceText(repliedMsg.text ?? repliedMsg.caption ?? '')) {
+          const textToSave = (repliedMsg.text ?? repliedMsg.caption ?? '').trim();
+          await transactionService.updateOriginalText(transaction.id, textToSave, 'ITEMIZED_TEXT');
+          transaction.originalText = textToSave;
+          transaction.invoiceType = 'ITEMIZED_TEXT';
         }
 
         if (transaction.status === 'PAID') {

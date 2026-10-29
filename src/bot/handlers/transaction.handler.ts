@@ -5,7 +5,7 @@ import { TransactionService } from '../../transactions/transaction.service';
 import { DistributorService } from '../../distributors/distributor.service';
 import { requireAdmin } from '../middleware/auth.middleware';
 import { copyAccountKeyboard } from '../keyboards/keyboards';
-import { parseAmount, extractNoteFromText, nowISO } from '../helpers/format.helpers';
+import { parseAmount, extractNoteFromText, nowISO, isItemizedInvoiceText } from '../helpers/format.helpers';
 import {
   isFromBot,
   isCommand,
@@ -71,13 +71,20 @@ export function registerTransactionHandler(
 
     try {
       const mediaInfo = extractMediaInfo(msg);
+      const isMedia = Boolean(mediaInfo.mediaFileId);
+      const isItemized = !isMedia && isItemizedInvoiceText(rawText);
+      const invType = isMedia ? 'MEDIA' : isItemized ? 'ITEMIZED_TEXT' : 'TEXT_STANDARD';
+      const origText = isItemized ? (cleanText || rawText) : undefined;
+
       const tx = await transactionService.registerTransaction(
         chatId,
         config.pendingTopicId,
         msg.message_id,
         initialNotes.length > 0 ? initialNotes : undefined,
         mediaInfo.mediaFileId,
-        mediaInfo.mediaType
+        mediaInfo.mediaType,
+        invType,
+        origText
       );
       console.log(`📝 Auto-registered transaction: message ${msg.message_id}`);
 
@@ -211,7 +218,9 @@ export function registerTransactionHandler(
             msg.message_id,
             initialNotes.length > 0 ? initialNotes : undefined,
             mediaInfo.mediaFileId,
-            mediaInfo.mediaType
+            mediaInfo.mediaType,
+            'ITEMIZED_TEXT',
+            meatInvoice.formattedDisplay
           );
         } catch (err: unknown) {
           const errorMsg = (err as Error).message || '';
@@ -266,13 +275,21 @@ export function registerTransactionHandler(
       let transaction = await transactionService.findByAnyMessageId(chatId, repliedMsg.message_id);
       if (!transaction) {
         try {
+          const isMedia = Boolean(repliedMedia.mediaFileId);
+          const repliedText = repliedMsg.text ?? repliedMsg.caption ?? '';
+          const isItemized = meatInvoice ? true : (!isMedia && isItemizedInvoiceText(repliedText));
+          const invType = isMedia ? 'MEDIA' : isItemized ? 'ITEMIZED_TEXT' : 'TEXT_STANDARD';
+          const origText = meatInvoice ? meatInvoice.formattedDisplay : (isItemized ? repliedText : undefined);
+
           transaction = await transactionService.registerTransaction(
             chatId,
             config.pendingTopicId,
             repliedMsg.message_id,
             undefined,
             repliedMedia.mediaFileId,
-            repliedMedia.mediaType
+            repliedMedia.mediaType,
+            invType,
+            origText
           );
         } catch {
           await ctx.reply('❌ Could not find or register this transaction.', {
@@ -288,6 +305,17 @@ export function registerTransactionHandler(
         );
         transaction.mediaFileId = repliedMedia.mediaFileId;
         transaction.mediaType = repliedMedia.mediaType;
+      }
+
+      if (meatInvoice && !transaction.originalText) {
+        await transactionService.updateOriginalText(transaction.id, meatInvoice.formattedDisplay, 'ITEMIZED_TEXT');
+        transaction.originalText = meatInvoice.formattedDisplay;
+        transaction.invoiceType = 'ITEMIZED_TEXT';
+      } else if (!transaction.originalText && isItemizedInvoiceText(repliedMsg.text ?? repliedMsg.caption ?? '')) {
+        const textToSave = (repliedMsg.text ?? repliedMsg.caption ?? '').trim();
+        await transactionService.updateOriginalText(transaction.id, textToSave, 'ITEMIZED_TEXT');
+        transaction.originalText = textToSave;
+        transaction.invoiceType = 'ITEMIZED_TEXT';
       }
 
       if (transaction.status !== 'PENDING') {

@@ -371,6 +371,233 @@ export function stripDuplicateTotalLines(text: string): string {
     .trim();
 }
 
+/**
+ * Checks if raw text contains an itemized invoice item list
+ * (product names, quantities, unit prices, line totals, or meat invoice lines).
+ */
+export function isItemizedInvoiceText(text: string): boolean {
+  if (!text || !text.trim()) return false;
+  const trimmed = text.trim();
+
+  if (/MEAT INVOICE/i.test(trimmed)) return true;
+
+  const lines = trimmed.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0);
+  let itemLineCount = 0;
+  for (const line of lines) {
+    if (/^━+$/.test(line) || /^─+$/.test(line) || /^-+$/.test(line)) continue;
+    if (/^(?:🏢|🏦|💳|👤|🔢|🆔)/.test(line)) continue;
+    if (/^(?:📜|📊|📥|➕|➖|✅|📝|💰|💵|⚖️)/.test(line)) continue;
+    if (/^(?:ACTION HISTORY|FINANCIAL SUMMARY|INVOICE)/i.test(line)) continue;
+    if (/^└─>/.test(line)) continue;
+    if (/^\/(?:baraka|ikhlas|koreta|amount|add|note|paid|edit)\b/i.test(line)) continue;
+
+    // Pattern: '1. ...' or '1) ...' or '• ...'
+    if (/^(?:\d+[\.\)]|[•\-])\s+\S+/.test(line)) {
+      itemLineCount++;
+    } else if (/\b\d+(?:[.,]\d+)?\s*(?:kg|ta|g|pcs|box|개|근|박스)?\s*(?:[xX×\*]|@)\s*[₩\d]/i.test(line)) {
+      itemLineCount++;
+    } else if (/\b\d+(?:[.,]\d+)?\s*(?:kg|ta|g|pcs|box|개|근|박스)\s*=\s*[₩\d]/i.test(line)) {
+      itemLineCount++;
+    } else if (/^(.+?)\s+(\d+(?:[.,]\d+)?)\s*(?:kg|ta)?\s*(?:[xX×\*])\s*(\d+(?:[.,]\d+)?)/i.test(line)) {
+      itemLineCount++;
+    }
+  }
+  return itemLineCount > 0;
+}
+
+/**
+ * Extracts the itemized content section from a raw message or bot-rendered text invoice.
+ */
+export function extractItemizedTextFromMessage(text: string): string {
+  if (!text) return '';
+  const trimmed = text.trim();
+
+  // If text contains ACTION HISTORY, items are before ACTION HISTORY
+  const historyIdx = trimmed.search(/(?:^|\n)━+\s*\n📜\s*ACTION HISTORY/i);
+  const content = historyIdx !== -1 ? trimmed.substring(0, historyIdx).trim() : trimmed;
+
+  const lines = content.split(/\r?\n/).map((l) => l.trimEnd());
+  const itemLines: string[] = [];
+  let pastHeader = false;
+
+  // Check if content starts with bot header
+  if (lines.length > 0 && /^━+$/.test(lines[0].trim())) {
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (!pastHeader) {
+        if (/^🏢/.test(line)) {
+          pastHeader = true;
+        }
+        continue;
+      }
+      if (/^━+$/.test(line)) break;
+      itemLines.push(lines[i]);
+    }
+    const result = itemLines.join('\n').trim();
+    if (result.length > 0) return result;
+  }
+
+  return content;
+}
+
+export interface BuildItemizedInvoiceParams {
+  invoiceId: number;
+  distributor?: DistributorSnapshot | null;
+  originalText: string;
+  receivedAt: string;
+  initialAmount?: number | null;
+  currentAmount?: number | null;
+  additions?: InvoiceAdditionEvent[];
+  payments?: PaymentEvent[];
+  notes?: InvoiceNote[];
+  hasSeparateAccountControlMessage?: boolean;
+}
+
+/**
+ * Builds the Type A (Itemized text invoice) message format.
+ * Preserves the complete original itemized invoice content at the top as source of truth,
+ * followed by the invoice identifier, distributor/account details, append-only action history,
+ * and updated financial summary.
+ */
+export function buildItemizedTextInvoiceMessage(params: BuildItemizedInvoiceParams): string {
+  const additions = params.additions ?? [];
+  const payments = params.payments ?? [];
+  const notes = params.notes ?? [];
+
+  const summary = computeInvoiceFinancialSummary({
+    initialAmount: params.initialAmount,
+    currentAmount: params.currentAmount,
+    additions,
+    payments,
+  });
+
+  const sections: string[] = [];
+
+  // 1. Original Itemized Content (Source of truth, preserved intact)
+  sections.push(params.originalText.trim());
+
+  // 2. Invoice identification & Distributor details
+  const idAndDist: string[] = [METADATA_SEPARATOR];
+  const invoiceIdStr = formatInvoiceId(params.invoiceId);
+  const distName = params.distributor?.name?.trim();
+  if (distName) {
+    idAndDist.push(`🆔 ${invoiceIdStr} • 🏢 ${distName}`);
+  } else {
+    idAndDist.push(`🆔 ${invoiceIdStr}`);
+  }
+
+  if (params.distributor && !params.hasSeparateAccountControlMessage) {
+    const bankName = params.distributor.bankName?.trim();
+    const accountNumber = params.distributor.accountNumber?.trim();
+    const accountHolder = params.distributor.accountHolder?.trim();
+    if (bankName) idAndDist.push(`🏦 Bank: ${bankName}`);
+    if (accountNumber) idAndDist.push(`🔢 Account: ${accountNumber}`);
+    if (accountHolder) idAndDist.push(`👤 Holder: ${accountHolder}`);
+  }
+  sections.push(idAndDist.join('\n'));
+
+  // 3. Action History
+  type HistoryItem =
+    | { type: 'addition'; date: string; amount: number; note?: string | null }
+    | { type: 'note'; date: string; text: string }
+    | { type: 'payment'; date: string; amount: number; note?: string | null; receiptUrl?: string | null };
+
+  const eventList: HistoryItem[] = [];
+  for (const a of additions) {
+    eventList.push({ type: 'addition', date: a.addedAt, amount: a.amount, note: a.note });
+  }
+  for (const n of notes) {
+    eventList.push({ type: 'note', date: n.createdAt, text: n.text });
+  }
+  for (const p of payments) {
+    eventList.push({ type: 'payment', date: p.paidAt, amount: p.amount, note: p.note, receiptUrl: p.receiptUrl });
+  }
+  eventList.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+
+  const formatRegistrationBlock = (): string => {
+    const regAmt = summary.originalAmount !== null ? formatAmount(summary.originalAmount) : 'Not set';
+    return [
+      '📥 Original Registration:',
+      `└─> 🕧 ${formatTimestamp(params.receivedAt)}`,
+      '💵 Registered Amount:',
+      `└─> 💰 ${regAmt}`,
+    ].join('\n');
+  };
+
+  const paymentEvents = eventList.filter((e) => e.type === 'payment');
+  const lastPayment = paymentEvents.length > 0 ? paymentEvents[paymentEvents.length - 1] : null;
+
+  const formatEventBlock = (item: HistoryItem, isLastPayment?: boolean): string => {
+    if (item.type === 'addition') {
+      const lines = [
+        '➕ Invoice Addition',
+        `└─> 🕧 ${formatTimestamp(item.date)}`,
+        '💵 Amount Added:',
+        `└─> 💰 ${formatAmount(item.amount)}`,
+      ];
+      if (item.note) {
+        lines.push(`📝 Note: ${item.note}`);
+      }
+      return lines.join('\n');
+    }
+    if (item.type === 'note') {
+      return `📝 Note: ${item.text}`;
+    }
+    if (item.type === 'payment') {
+      const isFull = summary.status === 'PAID' && isLastPayment;
+      const pLabel = isFull ? '✅ Full payment' : '➖ Partial payment';
+      const lines = [
+        pLabel,
+        `└─> 🕧 ${formatTimestamp(item.date)}`,
+        '💵 Amount paid:',
+        `└─> 💰 ${formatAmount(item.amount)}`,
+      ];
+      if (item.receiptUrl) {
+        lines.push('🧾 Receipt URL:');
+        lines.push(`└─> 🔗 ${item.receiptUrl}`);
+      }
+      if (item.note) {
+        lines.push(`📝 Note: ${item.note}`);
+      }
+      return lines.join('\n');
+    }
+    return '';
+  };
+
+  const allActionBlocks = [
+    formatRegistrationBlock(),
+    ...eventList.map((e) => formatEventBlock(e, e === lastPayment)),
+  ];
+
+  sections.push([
+    METADATA_SEPARATOR,
+    '📜 ACTION HISTORY',
+    METADATA_SEPARATOR,
+    allActionBlocks.join('\n\n'),
+  ].join('\n'));
+
+  // 4. Financial Summary
+  const statusStr =
+    summary.status === 'PAID'
+      ? '✅ PAID'
+      : summary.status === 'PARTIALLY_PAID'
+      ? '⏳ PARTIALLY PAID'
+      : '⏳ PENDING';
+
+  const summaryLines: string[] = [
+    METADATA_SEPARATOR,
+    '📊 FINANCIAL SUMMARY',
+    METADATA_SEPARATOR,
+    `💰 Invoice Total: ${formatAmount(summary.currentInvoiceTotal)}`,
+    `💵 Total Paid: ${formatAmount(summary.totalPaid)}`,
+    `⚖️ Need to Pay: ${formatAmount(summary.balanceDue)}`,
+    `📊 Status: ${statusStr}`,
+  ];
+  sections.push(summaryLines.join('\n'));
+
+  return sections.join('\n\n');
+}
+
 export interface BuildUnifiedInvoiceCaptionParams {
   invoiceId: number;
   title?: string;

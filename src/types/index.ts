@@ -102,6 +102,8 @@ export interface InvoiceNote {
   author?: string;
 }
 
+export type InvoiceType = 'ITEMIZED_TEXT' | 'MEDIA' | 'TEXT_STANDARD';
+
 export interface Transaction {
   id: number;
   telegramChatId: string;
@@ -126,6 +128,8 @@ export interface Transaction {
   notes: InvoiceNote[];
   mediaFileId?: string | null;
   mediaType?: string | null;
+  invoiceType?: InvoiceType | null;
+  originalText?: string | null;
   createdAt: string;
 }
 
@@ -153,6 +157,8 @@ export interface TransactionRow {
   notes: string | null;
   media_file_id?: string | null;
   media_type?: string | null;
+  invoice_type?: string | null;
+  original_text?: string | null;
   created_at: string;
 }
 

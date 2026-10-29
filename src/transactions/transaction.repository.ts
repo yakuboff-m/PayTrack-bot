@@ -16,12 +16,14 @@ export class TransactionRepository {
     receivedAt: string,
     notes?: string,
     mediaFileId?: string | null,
-    mediaType?: string | null
+    mediaType?: string | null,
+    invoiceType?: string | null,
+    originalText?: string | null
   ): Promise<TransactionRow> {
     const result = await this.db.exec(
-      `INSERT INTO transactions (telegram_chat_id, pending_topic_id, original_message_id, received_at, notes, media_file_id, media_type)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [chatId, topicId, messageId, receivedAt, notes ?? '[]', mediaFileId ?? null, mediaType ?? null]
+      `INSERT INTO transactions (telegram_chat_id, pending_topic_id, original_message_id, received_at, notes, media_file_id, media_type, invoice_type, original_text)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [chatId, topicId, messageId, receivedAt, notes ?? '[]', mediaFileId ?? null, mediaType ?? null, invoiceType ?? null, originalText ?? null]
     );
     const created = await this.findById(result.lastInsertRowid as number);
     if (!created) {
@@ -41,18 +43,22 @@ export class TransactionRepository {
     notes?: string | null;
     mediaFileId?: string | null;
     mediaType?: string | null;
+    invoiceType?: string | null;
+    originalText?: string | null;
   }): Promise<TransactionRow> {
     if (params.id) {
       await this.db.exec(
-        `INSERT INTO transactions (id, telegram_chat_id, pending_topic_id, original_message_id, metadata_message_id, distributor_snapshot, initial_amount, amount, received_at, notes, media_file_id, media_type)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO transactions (id, telegram_chat_id, pending_topic_id, original_message_id, metadata_message_id, distributor_snapshot, initial_amount, amount, received_at, notes, media_file_id, media_type, invoice_type, original_text)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            metadata_message_id = COALESCE(metadata_message_id, excluded.metadata_message_id),
            distributor_snapshot = COALESCE(distributor_snapshot, excluded.distributor_snapshot),
            initial_amount = COALESCE(initial_amount, excluded.initial_amount),
            amount = COALESCE(amount, excluded.amount),
            media_file_id = COALESCE(media_file_id, excluded.media_file_id),
-           media_type = COALESCE(media_type, excluded.media_type)`,
+           media_type = COALESCE(media_type, excluded.media_type),
+           invoice_type = COALESCE(invoice_type, excluded.invoice_type),
+           original_text = COALESCE(original_text, excluded.original_text)`,
         [
           params.id,
           params.chatId,
@@ -66,6 +72,8 @@ export class TransactionRepository {
           params.notes ?? null,
           params.mediaFileId ?? null,
           params.mediaType ?? null,
+          params.invoiceType ?? null,
+          params.originalText ?? null,
         ]
       );
       const row = await this.findById(params.id);
@@ -78,7 +86,9 @@ export class TransactionRepository {
         params.receivedAt,
         params.notes ?? undefined,
         params.mediaFileId ?? null,
-        params.mediaType ?? null
+        params.mediaType ?? null,
+        params.invoiceType ?? null,
+        params.originalText ?? null
       );
     }
   }
@@ -146,6 +156,21 @@ export class TransactionRepository {
 
   async updateNotes(id: number, notesJson: string): Promise<void> {
     await this.db.exec('UPDATE transactions SET notes = ? WHERE id = ?', [notesJson, id]);
+  }
+
+  async updateOriginalText(id: number, originalText: string, invoiceType?: string | null): Promise<void> {
+    if (invoiceType) {
+      await this.db.exec(
+        'UPDATE transactions SET original_text = ?, invoice_type = COALESCE(invoice_type, ?) WHERE id = ?',
+        [originalText, invoiceType, id]
+      );
+    } else {
+      await this.db.exec('UPDATE transactions SET original_text = ? WHERE id = ?', [originalText, id]);
+    }
+  }
+
+  async updateInvoiceType(id: number, invoiceType: string): Promise<void> {
+    await this.db.exec('UPDATE transactions SET invoice_type = ? WHERE id = ?', [invoiceType, id]);
   }
 
   async findByPaymentMessageId(
