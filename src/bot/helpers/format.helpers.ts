@@ -1,7 +1,7 @@
 import { format } from 'date-fns';
 import { toZonedTime } from 'date-fns-tz';
 import type { DistributorSnapshot, InvoiceNote } from '../../types';
-import { METADATA_SEPARATOR, MAX_TEXT_LENGTH } from './telegram.helpers';
+import { METADATA_SEPARATOR, MAX_TEXT_LENGTH, splitOriginalAndMetadata } from './telegram.helpers';
 
 const TIMEZONE = 'Asia/Seoul';
 
@@ -380,6 +380,7 @@ export function isItemizedInvoiceText(text: string): boolean {
   if (!text || !text.trim()) return false;
   const trimmed = text.trim();
 
+  if (trimmed.includes('📄📄📄')) return true;
   if (/MEAT INVOICE/i.test(trimmed)) return true;
 
   const lines = trimmed.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0);
@@ -395,11 +396,11 @@ export function isItemizedInvoiceText(text: string): boolean {
     // Pattern: '1. ...' or '1) ...' or '• ...'
     if (/^(?:\d+[\.\)]|[•\-])\s+\S+/.test(line)) {
       itemLineCount++;
-    } else if (/\b\d+(?:[.,]\d+)?\s*(?:kg|ta|g|pcs|box|개|근|박스)?\s*(?:[xX×\*]|@)\s*[₩\d]/i.test(line)) {
+    } else if (/\b\d+(?:[.,]\d+)?\s*(?:kg|ta|dona|g|pcs|box|개|근|박스)?\s*(?:[xX×\*]|@)\s*[₩\d]/i.test(line)) {
       itemLineCount++;
-    } else if (/\b\d+(?:[.,]\d+)?\s*(?:kg|ta|g|pcs|box|개|근|박스)\s*=\s*[₩\d]/i.test(line)) {
+    } else if (/\b\d+(?:[.,]\d+)?\s*(?:kg|ta|dona|g|pcs|box|개|근|박스)\s*=\s*[₩\d]/i.test(line)) {
       itemLineCount++;
-    } else if (/^(.+?)\s+(\d+(?:[.,]\d+)?)\s*(?:kg|ta)?\s*(?:[xX×\*])\s*(\d+(?:[.,]\d+)?)/i.test(line)) {
+    } else if (/^(.+?)\s+(\d+(?:[.,]\d+)?)\s*(?:kg|ta|dona)?\s*(?:[xX×\*])\s*(\d+(?:[.,]\d+)?)/i.test(line)) {
       itemLineCount++;
     }
   }
@@ -413,39 +414,28 @@ export function extractItemizedTextFromMessage(text: string): string {
   if (!text) return '';
   const trimmed = text.trim();
 
-  if (trimmed.includes('📄📄📄') || trimmed.includes('📥📥📥') || /ACTION HISTORY/i.test(trimmed)) {
+  if (
+    trimmed.includes('📄📄📄') ||
+    trimmed.includes('📥📥📥') ||
+    trimmed.includes('➕➕➕') ||
+    trimmed.includes('➖➖➖') ||
+    trimmed.includes('📊📊📊') ||
+    /ACTION HISTORY/i.test(trimmed) ||
+    /FINANCIAL SUMMARY/i.test(trimmed)
+  ) {
     const cleaned = extractCleanItemizedItems(trimmed);
     if (cleaned.length > 0) {
       return cleaned;
     }
   }
 
-  // If text contains ACTION HISTORY, items are before ACTION HISTORY
-  const historyIdx = trimmed.search(/(?:^|\n)━+\s*\n📜\s*ACTION HISTORY/i);
-  const content = historyIdx !== -1 ? trimmed.substring(0, historyIdx).trim() : trimmed;
-
-  const lines = content.split(/\r?\n/).map((l) => l.trimEnd());
-  const itemLines: string[] = [];
-  let pastHeader = false;
-
-  // Check if content starts with bot header
-  if (lines.length > 0 && /^━+$/.test(lines[0].trim())) {
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i].trim();
-      if (!pastHeader) {
-        if (/^🏢/.test(line)) {
-          pastHeader = true;
-        }
-        continue;
-      }
-      if (/^━+$/.test(line)) break;
-      itemLines.push(lines[i]);
-    }
-    const result = itemLines.join('\n').trim();
-    if (result.length > 0) return result;
+  const { original } = splitOriginalAndMetadata(trimmed);
+  const cleaned = extractCleanItemizedItems(original);
+  if (cleaned.length > 0) {
+    return cleaned;
   }
 
-  return content;
+  return original.trim();
 }
 
 export interface BuildUnifiedInvoiceCaptionParams {

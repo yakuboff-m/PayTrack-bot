@@ -5,7 +5,7 @@ import { TransactionService } from '../../transactions/transaction.service';
 import { DistributorService } from '../../distributors/distributor.service';
 import { requireAdmin } from '../middleware/auth.middleware';
 import { copyAccountKeyboard } from '../keyboards/keyboards';
-import { parseAmount, extractNoteFromText, nowISO, isItemizedInvoiceText } from '../helpers/format.helpers';
+import { parseAmount, extractNoteFromText, nowISO, isItemizedInvoiceText, extractItemizedTextFromMessage } from '../helpers/format.helpers';
 import {
   isFromBot,
   isCommand,
@@ -74,7 +74,7 @@ export function registerTransactionHandler(
       const isMedia = Boolean(mediaInfo.mediaFileId);
       const isItemized = !isMedia && isItemizedInvoiceText(rawText);
       const invType = isMedia ? 'MEDIA' : isItemized ? 'ITEMIZED_TEXT' : 'TEXT_STANDARD';
-      const origText = isItemized ? (cleanText || rawText) : undefined;
+      const origText = !isMedia ? (cleanText || rawText) : undefined;
 
       const tx = await transactionService.registerTransaction(
         chatId,
@@ -312,7 +312,7 @@ export function registerTransactionHandler(
         transaction.originalText = meatInvoice.formattedDisplay;
         transaction.invoiceType = 'ITEMIZED_TEXT';
       } else if (!transaction.originalText && isItemizedInvoiceText(repliedMsg.text ?? repliedMsg.caption ?? '')) {
-        const textToSave = (repliedMsg.text ?? repliedMsg.caption ?? '').trim();
+        const textToSave = extractItemizedTextFromMessage(repliedMsg.text ?? repliedMsg.caption ?? '');
         await transactionService.updateOriginalText(transaction.id, textToSave, 'ITEMIZED_TEXT');
         transaction.originalText = textToSave;
         transaction.invoiceType = 'ITEMIZED_TEXT';

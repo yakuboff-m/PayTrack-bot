@@ -434,6 +434,7 @@ describe('Itemized Text Invoice Preservation and Type Separation Test Suite', ()
     assert.ok(caption.includes('🆔 <b>#INV'));
     assert.ok(caption.includes('💰 Invoice Total: ₩80,000'));
     assert.ok(caption.includes('Monthly cleaning service fee for store front'));
+    assert.equal(caption.includes('📄📄📄'), false, 'Type C must not contain 📄📄📄 marker');
   });
 
   it('4. Production safety & Idempotency: legacy records and retry protection', async () => {

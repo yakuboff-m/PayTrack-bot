@@ -312,8 +312,8 @@ export class TransactionService {
     const isItemized =
       !hasAnyMedia &&
       (tx.invoiceType === 'ITEMIZED_TEXT' ||
-        Boolean(tx.originalText) ||
-        Boolean(rawContent && isItemizedInvoiceText(rawContent)));
+        (tx.invoiceType !== 'TEXT_STANDARD' && Boolean(tx.originalText) && isItemizedInvoiceText(tx.originalText!)) ||
+        (tx.invoiceType !== 'TEXT_STANDARD' && Boolean(rawContent && isItemizedInvoiceText(rawContent))));
 
     if (isItemized) {
       let origText = tx.originalText;
@@ -1391,9 +1391,10 @@ export class TransactionService {
       // Compose caption
       const repliedText = repliedMessage.text ?? repliedMessage.caption ?? '';
       const isItemized =
-        transaction.invoiceType === 'ITEMIZED_TEXT' ||
-        Boolean(transaction.originalText) ||
-        (!isMedia && isItemizedInvoiceText(repliedText));
+        !isMedia &&
+        (transaction.invoiceType === 'ITEMIZED_TEXT' ||
+          (transaction.invoiceType !== 'TEXT_STANDARD' && Boolean(transaction.originalText) && isItemizedInvoiceText(transaction.originalText!)) ||
+          (transaction.invoiceType !== 'TEXT_STANDARD' && isItemizedInvoiceText(repliedText)));
 
       let safeCaption: string;
 

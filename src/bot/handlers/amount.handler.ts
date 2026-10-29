@@ -4,7 +4,7 @@ import { TransactionService } from '../../transactions/transaction.service';
 import { DistributorService } from '../../distributors/distributor.service';
 import { requireAdmin } from '../middleware/auth.middleware';
 import { getConfig, type Config } from '../../config/config';
-import { parseAmount, formatAmount, formatInvoiceId, isItemizedInvoiceText } from '../helpers/format.helpers';
+import { parseAmount, formatAmount, formatInvoiceId, isItemizedInvoiceText, extractItemizedTextFromMessage } from '../helpers/format.helpers';
 import { copyAccountKeyboard } from '../keyboards/keyboards';
 import { getEffectiveRepliedMessage, extractMediaInfo } from '../helpers/telegram.helpers';
 import { parseMeatInvoice } from '../../transactions/meat-invoice';
@@ -124,7 +124,7 @@ export function registerAmountHandler(
         }
 
         if (!transaction.originalText && !transaction.mediaFileId && isItemizedInvoiceText(repliedMsg.text ?? repliedMsg.caption ?? '')) {
-          const textToSave = (repliedMsg.text ?? repliedMsg.caption ?? '').trim();
+          const textToSave = extractItemizedTextFromMessage(repliedMsg.text ?? repliedMsg.caption ?? '');
           await transactionService.updateOriginalText(transaction.id, textToSave, 'ITEMIZED_TEXT');
           transaction.originalText = textToSave;
           transaction.invoiceType = 'ITEMIZED_TEXT';
@@ -245,7 +245,7 @@ export function registerAmountHandler(
         }
 
         if (!transaction.originalText && !transaction.mediaFileId && isItemizedInvoiceText(repliedMsg.text ?? repliedMsg.caption ?? '')) {
-          const textToSave = (repliedMsg.text ?? repliedMsg.caption ?? '').trim();
+          const textToSave = extractItemizedTextFromMessage(repliedMsg.text ?? repliedMsg.caption ?? '');
           await transactionService.updateOriginalText(transaction.id, textToSave, 'ITEMIZED_TEXT');
           transaction.originalText = textToSave;
           transaction.invoiceType = 'ITEMIZED_TEXT';
