@@ -355,6 +355,9 @@ export class TransactionService {
       title: isMeat ? '🥩 MEAT INVOICE' : '🧾 INVOICE',
       distributor: tx.distributorSnapshot,
       itemsBreakdown: cleanItems,
+      originalText: tx.originalText || rawContent,
+      isMedia: hasAnyMedia,
+      isItemized: false,
       receivedAt: tx.receivedAt,
       initialAmount,
       currentAmount: tx.amount,
@@ -413,11 +416,13 @@ export class TransactionService {
         const editMarkup = !transaction.accountControlMessageId ? effectiveKeyboard : undefined;
         if (msgType === 'text') {
           await api.editMessageText(chatId, transaction.metadataMessageId, safeCaption, {
+            parse_mode: 'HTML',
             reply_markup: editMarkup,
           });
         } else {
           await api.editMessageCaption(chatId, transaction.metadataMessageId, {
             caption: safeCaption,
+            parse_mode: 'HTML',
             reply_markup: editMarkup,
           });
         }
@@ -439,6 +444,7 @@ export class TransactionService {
           const fileId = photos[photos.length - 1].file_id;
           botMsg = await api.sendPhoto(chatId, fileId, {
             caption: safeCaption,
+            parse_mode: 'HTML',
             message_thread_id: topicId,
             reply_markup: sendMarkup,
           });
@@ -448,6 +454,7 @@ export class TransactionService {
           const fileId = repliedMessage.document!.file_id;
           botMsg = await api.sendDocument(chatId, fileId, {
             caption: safeCaption,
+            parse_mode: 'HTML',
             message_thread_id: topicId,
             reply_markup: sendMarkup,
           });
@@ -456,6 +463,7 @@ export class TransactionService {
         case 'text':
         default: {
           botMsg = await api.sendMessage(chatId, safeCaption, {
+            parse_mode: 'HTML',
             message_thread_id: topicId,
             reply_markup: sendMarkup,
           });
@@ -1042,6 +1050,7 @@ export class TransactionService {
               try {
                 await api.editMessageCaption(chatId, invoiceMessageId, {
                   caption: cleanedCaption,
+                  parse_mode: 'HTML',
                   reply_markup: { inline_keyboard: [] },
                 });
                 editSucceeded = true;
@@ -1054,6 +1063,7 @@ export class TransactionService {
             } else {
               try {
                 await api.editMessageText(chatId, invoiceMessageId, cleanedCaption, {
+                  parse_mode: 'HTML',
                   reply_markup: { inline_keyboard: [] },
                 });
                 editSucceeded = true;
@@ -1062,6 +1072,7 @@ export class TransactionService {
                   try {
                     await api.editMessageCaption(chatId, invoiceMessageId, {
                       caption: cleanedCaption,
+                      parse_mode: 'HTML',
                       reply_markup: { inline_keyboard: [] },
                     });
                     editSucceeded = true;
@@ -1132,6 +1143,7 @@ export class TransactionService {
               try {
                 await api.editMessageCaption(chatId, invoiceMessageId, {
                   caption: newContent,
+                  parse_mode: 'HTML',
                   reply_markup: pendingKeyboard,
                 });
               } catch (editErr: unknown) {
@@ -1147,6 +1159,7 @@ export class TransactionService {
                   invoiceMessageId,
                   newContent,
                   {
+                    parse_mode: 'HTML',
                     reply_markup: pendingKeyboard,
                   }
                 );
@@ -1417,6 +1430,7 @@ export class TransactionService {
           title: isMeat ? '🥩 MEAT INVOICE' : '🧾 INVOICE',
           distributor: transaction.distributorSnapshot,
           itemsBreakdown: cleanItems,
+          isMedia: isMedia || hasAddedMedia,
           receivedAt: transaction.receivedAt,
           initialAmount,
           currentAmount: newTotalAmount,
@@ -1641,6 +1655,7 @@ export class TransactionService {
           try {
             await api.editMessageCaption(chatId, targetMessageId, {
               caption: safeCaption,
+              parse_mode: 'HTML',
               reply_markup: buttonMarkup,
             });
             editSucceeded = true;
@@ -1648,6 +1663,7 @@ export class TransactionService {
             if (isNoTextMessageError(capErr)) {
               try {
                 await api.editMessageText(chatId, targetMessageId, safeCaption, {
+                  parse_mode: 'HTML',
                   reply_markup: buttonMarkup,
                 });
                 editSucceeded = true;
@@ -1659,6 +1675,7 @@ export class TransactionService {
         } else {
           try {
             await api.editMessageText(chatId, targetMessageId, safeCaption, {
+              parse_mode: 'HTML',
               reply_markup: buttonMarkup,
             });
             editSucceeded = true;
@@ -1667,6 +1684,7 @@ export class TransactionService {
               try {
                 await api.editMessageCaption(chatId, targetMessageId, {
                   caption: safeCaption,
+                  parse_mode: 'HTML',
                   reply_markup: buttonMarkup,
                 });
                 editSucceeded = true;

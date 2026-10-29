@@ -1,7 +1,7 @@
 import { format } from 'date-fns';
 import { toZonedTime } from 'date-fns-tz';
 import type { DistributorSnapshot, InvoiceNote } from '../../types';
-import { METADATA_SEPARATOR } from './telegram.helpers';
+import { METADATA_SEPARATOR, MAX_TEXT_LENGTH } from './telegram.helpers';
 
 const TIMEZONE = 'Asia/Seoul';
 
@@ -351,12 +351,13 @@ export function stripDuplicateTotalLines(text: string): string {
       if (!trimmed) return false;
       if (/^(?:💰\s*)?(?:Grand\s+)?Total:\s*₩?[\d,\s]+/i.test(trimmed)) return false;
       if (/^(?:🧾|🥩|💰)?\s*(?:MEAT\s+)?INVOICE\b/i.test(trimmed)) return false;
-      if (/^#?INV\d+\b/i.test(trimmed)) return false;
+      if (/^(?:🆔\s*)?#?INV\d+\b/i.test(trimmed)) return false;
       if (/^━+$/.test(trimmed) || /^─+$/.test(trimmed) || /^-+$/.test(trimmed)) return false;
       if (/^(?:🏢|🏦|💳|👤|🔢)/.test(trimmed)) return false;
       if (/^(?:📜\s*)?ACTION HISTORY/i.test(trimmed)) return false;
+      if (/^(?:📥{1,3}|➕{1,3}|➖{1,3}|📊{1,3}|📄{1,3})/.test(trimmed)) return false;
       if (
-        /^(?:📥\s*Original Registration|➕\s*Invoice Addition|➖\s*Partial payment|✅\s*Full payment|📝\s*Note:|💵\s*Registered Amount|💵\s*Amount Added|💵\s*Amount paid|🧾\s*Receipt URL)/i.test(
+        /^(?:📥\s*Original Registration|➕\s*Invoice Addition|➖\s*Partial payment|✅\s*Full payment|📝\s*Note:|💵\s*Registered Amount|💵\s*Amount Added|💵\s*Amount paid|🧾\s*Receipt URL|🔗\s*Receipt URL|🕧)/i.test(
           trimmed
         )
       )
@@ -386,7 +387,7 @@ export function isItemizedInvoiceText(text: string): boolean {
   for (const line of lines) {
     if (/^━+$/.test(line) || /^─+$/.test(line) || /^-+$/.test(line)) continue;
     if (/^(?:🏢|🏦|💳|👤|🔢|🆔)/.test(line)) continue;
-    if (/^(?:📜|📊|📥|➕|➖|✅|📝|💰|💵|⚖️)/.test(line)) continue;
+    if (/^(?:📜|📊|📥|➕|➖|✅|📝|💰|💵|⚖️|📄|🕧|🔗)/.test(line)) continue;
     if (/^(?:ACTION HISTORY|FINANCIAL SUMMARY|INVOICE)/i.test(line)) continue;
     if (/^└─>/.test(line)) continue;
     if (/^\/(?:baraka|ikhlas|koreta|amount|add|note|paid|edit)\b/i.test(line)) continue;
@@ -411,6 +412,13 @@ export function isItemizedInvoiceText(text: string): boolean {
 export function extractItemizedTextFromMessage(text: string): string {
   if (!text) return '';
   const trimmed = text.trim();
+
+  if (trimmed.includes('📄📄📄') || trimmed.includes('📥📥📥') || /ACTION HISTORY/i.test(trimmed)) {
+    const cleaned = extractCleanItemizedItems(trimmed);
+    if (cleaned.length > 0) {
+      return cleaned;
+    }
+  }
 
   // If text contains ACTION HISTORY, items are before ACTION HISTORY
   const historyIdx = trimmed.search(/(?:^|\n)━+\s*\n📜\s*ACTION HISTORY/i);
@@ -440,169 +448,14 @@ export function extractItemizedTextFromMessage(text: string): string {
   return content;
 }
 
-export interface BuildItemizedInvoiceParams {
-  invoiceId: number;
-  distributor?: DistributorSnapshot | null;
-  originalText: string;
-  receivedAt: string;
-  initialAmount?: number | null;
-  currentAmount?: number | null;
-  additions?: InvoiceAdditionEvent[];
-  payments?: PaymentEvent[];
-  notes?: InvoiceNote[];
-  hasSeparateAccountControlMessage?: boolean;
-}
-
-/**
- * Builds the Type A (Itemized text invoice) message format.
- * Preserves the complete original itemized invoice content at the top as source of truth,
- * followed by the invoice identifier, distributor/account details, append-only action history,
- * and updated financial summary.
- */
-export function buildItemizedTextInvoiceMessage(params: BuildItemizedInvoiceParams): string {
-  const additions = params.additions ?? [];
-  const payments = params.payments ?? [];
-  const notes = params.notes ?? [];
-
-  const summary = computeInvoiceFinancialSummary({
-    initialAmount: params.initialAmount,
-    currentAmount: params.currentAmount,
-    additions,
-    payments,
-  });
-
-  const sections: string[] = [];
-
-  // 1. Original Itemized Content (Source of truth, preserved intact)
-  sections.push(params.originalText.trim());
-
-  // 2. Invoice identification & Distributor details
-  const idAndDist: string[] = [METADATA_SEPARATOR];
-  const invoiceIdStr = formatInvoiceId(params.invoiceId);
-  const distName = params.distributor?.name?.trim();
-  if (distName) {
-    idAndDist.push(`🆔 ${invoiceIdStr} • 🏢 ${distName}`);
-  } else {
-    idAndDist.push(`🆔 ${invoiceIdStr}`);
-  }
-
-  if (params.distributor && !params.hasSeparateAccountControlMessage) {
-    const bankName = params.distributor.bankName?.trim();
-    const accountNumber = params.distributor.accountNumber?.trim();
-    const accountHolder = params.distributor.accountHolder?.trim();
-    if (bankName) idAndDist.push(`🏦 Bank: ${bankName}`);
-    if (accountNumber) idAndDist.push(`🔢 Account: ${accountNumber}`);
-    if (accountHolder) idAndDist.push(`👤 Holder: ${accountHolder}`);
-  }
-  sections.push(idAndDist.join('\n'));
-
-  // 3. Action History
-  type HistoryItem =
-    | { type: 'addition'; date: string; amount: number; note?: string | null }
-    | { type: 'note'; date: string; text: string }
-    | { type: 'payment'; date: string; amount: number; note?: string | null; receiptUrl?: string | null };
-
-  const eventList: HistoryItem[] = [];
-  for (const a of additions) {
-    eventList.push({ type: 'addition', date: a.addedAt, amount: a.amount, note: a.note });
-  }
-  for (const n of notes) {
-    eventList.push({ type: 'note', date: n.createdAt, text: n.text });
-  }
-  for (const p of payments) {
-    eventList.push({ type: 'payment', date: p.paidAt, amount: p.amount, note: p.note, receiptUrl: p.receiptUrl });
-  }
-  eventList.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
-
-  const formatRegistrationBlock = (): string => {
-    const regAmt = summary.originalAmount !== null ? formatAmount(summary.originalAmount) : 'Not set';
-    return [
-      '📥 Original Registration:',
-      `└─> 🕧 ${formatTimestamp(params.receivedAt)}`,
-      '💵 Registered Amount:',
-      `└─> 💰 ${regAmt}`,
-    ].join('\n');
-  };
-
-  const paymentEvents = eventList.filter((e) => e.type === 'payment');
-  const lastPayment = paymentEvents.length > 0 ? paymentEvents[paymentEvents.length - 1] : null;
-
-  const formatEventBlock = (item: HistoryItem, isLastPayment?: boolean): string => {
-    if (item.type === 'addition') {
-      const lines = [
-        '➕ Invoice Addition',
-        `└─> 🕧 ${formatTimestamp(item.date)}`,
-        '💵 Amount Added:',
-        `└─> 💰 ${formatAmount(item.amount)}`,
-      ];
-      if (item.note) {
-        lines.push(`📝 Note: ${item.note}`);
-      }
-      return lines.join('\n');
-    }
-    if (item.type === 'note') {
-      return `📝 Note: ${item.text}`;
-    }
-    if (item.type === 'payment') {
-      const isFull = summary.status === 'PAID' && isLastPayment;
-      const pLabel = isFull ? '✅ Full payment' : '➖ Partial payment';
-      const lines = [
-        pLabel,
-        `└─> 🕧 ${formatTimestamp(item.date)}`,
-        '💵 Amount paid:',
-        `└─> 💰 ${formatAmount(item.amount)}`,
-      ];
-      if (item.receiptUrl) {
-        lines.push('🧾 Receipt URL:');
-        lines.push(`└─> 🔗 ${item.receiptUrl}`);
-      }
-      if (item.note) {
-        lines.push(`📝 Note: ${item.note}`);
-      }
-      return lines.join('\n');
-    }
-    return '';
-  };
-
-  const allActionBlocks = [
-    formatRegistrationBlock(),
-    ...eventList.map((e) => formatEventBlock(e, e === lastPayment)),
-  ];
-
-  sections.push([
-    METADATA_SEPARATOR,
-    '📜 ACTION HISTORY',
-    METADATA_SEPARATOR,
-    allActionBlocks.join('\n\n'),
-  ].join('\n'));
-
-  // 4. Financial Summary
-  const statusStr =
-    summary.status === 'PAID'
-      ? '✅ PAID'
-      : summary.status === 'PARTIALLY_PAID'
-      ? '⏳ PARTIALLY PAID'
-      : '⏳ PENDING';
-
-  const summaryLines: string[] = [
-    METADATA_SEPARATOR,
-    '📊 FINANCIAL SUMMARY',
-    METADATA_SEPARATOR,
-    `💰 Invoice Total: ${formatAmount(summary.currentInvoiceTotal)}`,
-    `💵 Total Paid: ${formatAmount(summary.totalPaid)}`,
-    `⚖️ Need to Pay: ${formatAmount(summary.balanceDue)}`,
-    `📊 Status: ${statusStr}`,
-  ];
-  sections.push(summaryLines.join('\n'));
-
-  return sections.join('\n\n');
-}
-
 export interface BuildUnifiedInvoiceCaptionParams {
   invoiceId: number;
   title?: string;
   distributor?: DistributorSnapshot | null;
-  itemsBreakdown?: string;
+  itemsBreakdown?: string | null;
+  originalText?: string | null;
+  isItemized?: boolean;
+  isMedia?: boolean;
   receivedAt: string;
   initialAmount?: number | null;
   currentAmount?: number | null;
@@ -614,10 +467,73 @@ export interface BuildUnifiedInvoiceCaptionParams {
 }
 
 /**
- * Builds the authoritative, append-only invoice caption with:
- * A. Invoice identity/header
- * B. Append-only action history (Registration, additions, payments with receipt links)
- * C. Current financial summary (Updated invoice total, total paid, balance due, status)
+ * Extracts clean itemized content without redundant titles, headers, or action history.
+ */
+export function extractCleanItemizedItems(rawText: string): string {
+  if (!rawText) return '';
+  const trimmed = rawText.trim();
+
+  // If already contains 📄📄📄, extract what is under 📄📄📄
+  const docIdx = trimmed.search(/(?:^|\n)📄📄📄/);
+  let content = trimmed;
+  if (docIdx !== -1) {
+    content = trimmed.substring(docIdx).replace(/^(?:\r?\n)?📄📄📄\s*/, '');
+  }
+
+  // Cut off at action history or financial summary if present
+  const stopIdx = content.search(/(?:^|\n)(?:📥📥📥|➕➕➕|➖➖➖|📊📊📊|━+\s*\n(?:📜\s*)?ACTION HISTORY)/);
+  if (stopIdx !== -1) {
+    content = content.substring(0, stopIdx).trim();
+  }
+
+  const lines = content.split(/\r?\n/).map((l) => l.trimEnd());
+  const itemLines: string[] = [];
+  let started = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const lineTrimmed = line.trim();
+
+    if (!started) {
+      if (!lineTrimmed) continue;
+      if (/^🥩\s*MEAT INVOICE/i.test(lineTrimmed)) continue;
+      if (/^🧾\s*INVOICE/i.test(lineTrimmed)) continue;
+      if (/^📄{1,3}/i.test(lineTrimmed)) continue;
+      if (/^[━─—═-]+$/.test(lineTrimmed)) continue;
+      if (/^🆔\s*#?INV/i.test(lineTrimmed)) continue;
+      if (/^🏦\s*Bank:/i.test(lineTrimmed)) continue;
+      if (/^🔢\s*Account:/i.test(lineTrimmed)) continue;
+      if (/^👤\s*Holder:/i.test(lineTrimmed)) continue;
+      if (/^🏢/.test(lineTrimmed)) continue;
+      started = true;
+    }
+
+    if (/^[━─—═-]+$/.test(lineTrimmed) && i > 0 && /Total/i.test(lines[i - 1] ?? '')) {
+      break;
+    }
+
+    itemLines.push(line);
+  }
+
+  while (itemLines.length > 0 && /^[━─—═-]+$/.test(itemLines[itemLines.length - 1].trim())) {
+    itemLines.pop();
+  }
+
+  return itemLines.join('\n').trim();
+}
+
+/**
+ * Builds the unified invoice message/caption format for BOTH media-based and text-only invoices.
+ *
+ * Layout:
+ * 1. 🆔 <b>#INV0034 • 🏢 Ikhlas Market</b> (Bold)
+ * 2. Bank details (Bank, Account, Holder) if present and not in separate control message
+ * 3. 📄📄📄 + itemized list (ONLY if text-only itemized invoice; omitted for media)
+ *    OR clean invoice-specific text for text-only non-itemized invoices
+ * 4. 📥📥📥 (Registration event)
+ * 5. ➕➕➕ (Invoice additions)
+ * 6. ➖➖➖ (Payments)
+ * 7. 📊📊📊 (Financial summary with <b>⚖️ Need to Pay: ...</b> bold)
  */
 export function buildUnifiedInvoiceCaption(params: BuildUnifiedInvoiceCaptionParams): string {
   const maxLen = params.maxCaptionLength ?? 1024;
@@ -632,45 +548,55 @@ export function buildUnifiedInvoiceCaption(params: BuildUnifiedInvoiceCaptionPar
     payments,
   });
 
-  // ── A. Invoice identity/header ────────────────────────────
-  const headerLines: string[] = [METADATA_SEPARATOR];
-  const invoiceTitle = params.title || '🧾 INVOICE';
-  headerLines.push(`${invoiceTitle} • ${formatInvoiceId(params.invoiceId)}`);
-  headerLines.push(METADATA_SEPARATOR);
+  // ── 1. Header (Bold) ──────────────────────────────────────
+  const invIdStr = formatInvoiceId(params.invoiceId);
+  const distName = params.distributor?.name?.trim();
+  const header = distName
+    ? `🆔 <b>${invIdStr} • 🏢 ${escapeHtml(distName)}</b>`
+    : `🆔 <b>${invIdStr}</b>`;
 
-  if (params.distributor) {
-    if (!params.hasSeparateAccountControlMessage) {
-      const bankLines: string[] = [];
-      const bankName = params.distributor.bankName?.trim();
-      const accountNumber = params.distributor.accountNumber?.trim();
-      const accountHolder = params.distributor.accountHolder?.trim();
+  // ── 2. Bank Details ───────────────────────────────────────
+  const bankLines: string[] = [];
+  if (params.distributor && !params.hasSeparateAccountControlMessage) {
+    const bankName = params.distributor.bankName?.trim();
+    const accountNumber = params.distributor.accountNumber?.trim();
+    const accountHolder = params.distributor.accountHolder?.trim();
+    if (bankName) bankLines.push(`🏦 Bank: ${escapeHtml(bankName)}`);
+    if (accountNumber) bankLines.push(`🔢 Account: ${escapeHtml(accountNumber)}`);
+    if (accountHolder) bankLines.push(`👤 Holder: ${escapeHtml(accountHolder)}`);
+  }
 
-      if (bankName) {
-        bankLines.push(`🏦 Bank: ${bankName}`);
+  // ── 3. Invoice-Specific Content (ONLY for text-only invoices) ─
+  let itemSection: string | null = null;
+  if (!params.isMedia) {
+    const rawItems = params.originalText || params.itemsBreakdown || '';
+    if (params.isItemized) {
+      const cleanItems = extractCleanItemizedItems(rawItems);
+      if (cleanItems.length > 0) {
+        itemSection = `📄📄📄\n\n${cleanItems}`;
       }
-      if (accountNumber) {
-        bankLines.push(`🔢 Account: ${accountNumber}`);
-      }
-      if (accountHolder) {
-        bankLines.push(`👤 Holder: ${accountHolder}`);
-      }
-      if (bankLines.length > 0) {
-        headerLines.push(...bankLines);
-        headerLines.push('');
-        headerLines.push(METADATA_SEPARATOR);
+    } else if (rawItems) {
+      const clean = stripDuplicateTotalLines(rawItems);
+      if (clean.length > 0) {
+        itemSection = clean;
       }
     }
-
-    headerLines.push(`🏢 ${params.distributor.name}`);
   }
 
-  // ── Items breakdown (stripped of duplicate totals & header) ─
-  const cleanItems = params.itemsBreakdown ? stripDuplicateTotalLines(params.itemsBreakdown) : '';
-  if (cleanItems) {
-    headerLines.push(cleanItems);
+  // ── 4. Action History ─────────────────────────────────────
+  const regAmt = summary.originalAmount !== null ? formatAmount(summary.originalAmount) : 'Not set';
+  const regLines: string[] = [
+    '📥📥📥',
+    '',
+    `🕧 ${formatTimestamp(params.receivedAt)}`,
+    `💰 ${regAmt}`,
+  ];
+  const regNote = notes.find((n) => n.createdAt === params.receivedAt || !n.createdAt);
+  if (regNote) {
+    regLines.push(`📝 Note: ${escapeHtml(regNote.text)}`);
   }
+  const registrationBlock = regLines.join('\n');
 
-  // ── B. Append-only action history ─────────────────────────
   type HistoryItem =
     | { type: 'addition'; date: string; amount: number; note?: string | null }
     | { type: 'note'; date: string; text: string }
@@ -688,11 +614,13 @@ export function buildUnifiedInvoiceCaption(params: BuildUnifiedInvoiceCaptionPar
   }
 
   for (const n of notes) {
-    eventList.push({
-      type: 'note',
-      date: n.createdAt,
-      text: n.text,
-    });
+    if (n !== regNote) {
+      eventList.push({
+        type: 'note',
+        date: n.createdAt,
+        text: n.text,
+      });
+    }
   }
 
   for (const p of payments) {
@@ -705,94 +633,71 @@ export function buildUnifiedInvoiceCaption(params: BuildUnifiedInvoiceCaptionPar
     });
   }
 
-  // Chronological sort
   eventList.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
 
-  const formatRegistrationBlock = (): string => {
-    const regAmt = summary.originalAmount !== null ? formatAmount(summary.originalAmount) : 'Not set';
-    return [
-      '📥 Original Registration:',
-      `└─> 🕧 ${formatTimestamp(params.receivedAt)}`,
-      '💵 Registered Amount:',
-      `└─> 💰 ${regAmt}`,
-    ].join('\n');
-  };
-
-  const formatEventBlock = (item: HistoryItem, isLastPayment?: boolean): string => {
+  const formatEventBlock = (item: HistoryItem): string => {
     if (item.type === 'addition') {
       const lines = [
-        '➕ Invoice Addition',
-        `└─> 🕧 ${formatTimestamp(item.date)}`,
-        '💵 Amount Added:',
-        `└─> 💰 ${formatAmount(item.amount)}`,
+        '➕➕➕',
+        '',
+        `🕧 ${formatTimestamp(item.date)}`,
+        `💰 ${formatAmount(item.amount)}`,
       ];
       if (item.note) {
-        lines.push(`📝 Note: ${item.note}`);
+        lines.push(`📝 Note: ${escapeHtml(item.note)}`);
       }
       return lines.join('\n');
     }
     if (item.type === 'note') {
-      return `📝 Note: ${item.text}`;
+      return `📝 Note: ${escapeHtml(item.text)}`;
     }
     if (item.type === 'payment') {
-      const isFull = summary.status === 'PAID' && isLastPayment;
-      const pLabel = isFull ? '✅ Full payment' : '➖ Partial payment';
       const lines = [
-        pLabel,
-        `└─> 🕧 ${formatTimestamp(item.date)}`,
-        '💵 Amount paid:',
-        `└─> 💰 ${formatAmount(item.amount)}`,
+        '➖➖➖',
+        '',
+        `🕧 ${formatTimestamp(item.date)}`,
+        `💰 ${formatAmount(item.amount)}`,
       ];
       if (item.receiptUrl) {
-        lines.push('🧾 Receipt URL:');
-        lines.push(`└─> 🔗 ${item.receiptUrl}`);
+        lines.push(`🔗 Receipt URL: ${item.receiptUrl}`);
       }
       if (item.note) {
-        lines.push(`📝 Note: ${item.note}`);
+        lines.push(`📝 Note: ${escapeHtml(item.note)}`);
       }
       return lines.join('\n');
     }
     return '';
   };
 
-  const paymentEvents = eventList.filter((e) => e.type === 'payment');
-  const lastPayment = paymentEvents.length > 0 ? paymentEvents[paymentEvents.length - 1] : null;
+  const allEventBlocks = eventList.map(formatEventBlock).filter((b) => b.length > 0);
 
-  const allActionBlocks = [
-    formatRegistrationBlock(),
-    ...eventList.map((e) => formatEventBlock(e, e === lastPayment)),
-  ];
-
-  // ── C. Current financial summary ──────────────────────────
-  const statusStr =
-    summary.status === 'PAID'
-      ? '✅ PAID'
-      : summary.status === 'PARTIALLY_PAID'
-      ? '⏳ PARTIALLY PAID'
-      : '⏳ PENDING';
-
-  const summaryLines: string[] = [
-    METADATA_SEPARATOR,
-    '📊 FINANCIAL SUMMARY',
-    METADATA_SEPARATOR,
+  // ── 5. Financial Summary (Need to Pay in bold) ─────────────
+  const summaryLines = [
+    '📊📊📊',
+    '',
     `💰 Invoice Total: ${formatAmount(summary.currentInvoiceTotal)}`,
     `💵 Total Paid: ${formatAmount(summary.totalPaid)}`,
-    `⚖️ Need to Pay: ${formatAmount(summary.balanceDue)}`,
-    `📊 Status: ${statusStr}`,
+    `<b>⚖️ Need to Pay: ${formatAmount(summary.balanceDue)}</b>`,
   ];
+  const summaryBlock = summaryLines.join('\n');
 
-  const assemble = (actions: string[]): string => {
-    return [
-      headerLines.join('\n'),
-      METADATA_SEPARATOR,
-      '📜 ACTION HISTORY',
-      METADATA_SEPARATOR,
-      actions.join('\n\n'),
-      summaryLines.join('\n'),
-    ].join('\n');
+  const assemble = (eventBlocks: string[]): string => {
+    const parts: string[] = [header];
+    if (bankLines.length > 0) {
+      parts.push(bankLines.join('\n'));
+    }
+    if (itemSection) {
+      parts.push(itemSection);
+    }
+    parts.push(registrationBlock);
+    if (eventBlocks.length > 0) {
+      parts.push(...eventBlocks);
+    }
+    parts.push(summaryBlock);
+    return parts.join('\n\n');
   };
 
-  const fullCaption = assemble(allActionBlocks);
+  const fullCaption = assemble(allEventBlocks);
   if (fullCaption.length <= maxLen) {
     return fullCaption;
   }
@@ -802,9 +707,8 @@ export function buildUnifiedInvoiceCaption(params: BuildUnifiedInvoiceCaptionPar
     const hidden = eventList.length - keep;
     const keptEvents = eventList.slice(hidden);
     const compactedBlocks = [
-      formatRegistrationBlock(),
       `... (${hidden} earlier events preserved in history) ...`,
-      ...keptEvents.map((e) => formatEventBlock(e, e === lastPayment)),
+      ...keptEvents.map(formatEventBlock).filter((b) => b.length > 0),
     ];
     const compacted = assemble(compactedBlocks);
     if (compacted.length <= maxLen) {
@@ -813,10 +717,39 @@ export function buildUnifiedInvoiceCaption(params: BuildUnifiedInvoiceCaptionPar
   }
 
   const minimalBlocks = [
-    formatRegistrationBlock(),
     `... (${eventList.length} earlier events preserved in history) ...`,
   ];
   return assemble(minimalBlocks);
+}
+
+export interface BuildItemizedInvoiceParams {
+  invoiceId: number;
+  distributor?: DistributorSnapshot | null;
+  originalText: string;
+  receivedAt: string;
+  initialAmount?: number | null;
+  currentAmount?: number | null;
+  additions?: InvoiceAdditionEvent[];
+  payments?: PaymentEvent[];
+  notes?: InvoiceNote[];
+  hasSeparateAccountControlMessage?: boolean;
+}
+
+export function buildItemizedTextInvoiceMessage(params: BuildItemizedInvoiceParams): string {
+  return buildUnifiedInvoiceCaption({
+    invoiceId: params.invoiceId,
+    distributor: params.distributor,
+    originalText: params.originalText,
+    isItemized: true,
+    receivedAt: params.receivedAt,
+    initialAmount: params.initialAmount,
+    currentAmount: params.currentAmount,
+    additions: params.additions,
+    payments: params.payments,
+    notes: params.notes,
+    maxCaptionLength: MAX_TEXT_LENGTH,
+    hasSeparateAccountControlMessage: params.hasSeparateAccountControlMessage,
+  });
 }
 
 export interface AdditionsBreakdown {

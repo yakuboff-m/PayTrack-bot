@@ -92,6 +92,16 @@ export function splitOriginalAndMetadata(text: string): {
     return { original, metadata };
   }
 
+  // Unified format action history markers
+  const unifiedHistoryPattern = /\n((?:📥📥📥|➕➕➕|➖➖➖|📊📊📊)[\s\S]*)$/;
+  const uhMatch = text.match(unifiedHistoryPattern);
+  if (uhMatch && uhMatch.index !== undefined) {
+    const sepIndex = uhMatch.index + 1;
+    const original = text.substring(0, sepIndex).trimEnd();
+    const metadata = text.substring(sepIndex);
+    return { original, metadata };
+  }
+
   // Delimiter for metadata block: METADATA_SEPARATOR preceded by newline and followed by an invoice identifier/field
   const metadataBlockPattern = /\n(━━━━━━━━━━━━\s*\n(?:🆔|🏢|🏦|💳|👤|💰|📅|📝)[\s\S]*)$/;
   const match = text.match(metadataBlockPattern);

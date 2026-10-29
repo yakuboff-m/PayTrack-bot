@@ -240,15 +240,14 @@ describe('Itemized Text Invoice Preservation and Type Separation Test Suite', ()
     assert.ok(lastEditedText.includes('= ₩592,150'));
 
     // Check Action History contains addition exactly once
-    assert.ok(lastEditedText.includes('➕ Invoice Addition'));
-    assert.ok(lastEditedText.includes('💵 Amount Added:'));
+    assert.ok(lastEditedText.includes('➕➕➕'));
     assert.ok(lastEditedText.includes('₩200,000'));
     assert.ok(lastEditedText.includes('📝 Note: òtgan safargi ostatka'));
 
     // Check Financial Summary
     assert.ok(lastEditedText.includes('💰 Invoice Total: ₩2,299,580'));
     assert.ok(lastEditedText.includes('💵 Total Paid: ₩0'));
-    assert.ok(lastEditedText.includes('⚖️ Need to Pay: ₩2,299,580'));
+    assert.ok(lastEditedText.includes('<b>⚖️ Need to Pay: ₩2,299,580</b>'));
 
     // 3. Run /add 50,000 second addition with note
     await ctx.bot.handleUpdate({
@@ -357,7 +356,7 @@ describe('Itemized Text Invoice Preservation and Type Separation Test Suite', ()
     assert.ok(ctx.editedCaptions.length >= 1, 'Media caption must be edited');
     const caption1 = ctx.editedCaptions[ctx.editedCaptions.length - 1].caption;
     assert.ok(caption1.includes('💰 Invoice Total: ₩600,000'));
-    assert.ok(caption1.includes('➕ Invoice Addition'));
+    assert.ok(caption1.includes('➕➕➕'));
     assert.ok(caption1.includes('₩100,000'));
 
     // 3. /add with new photo (cumulative media group)
@@ -432,7 +431,7 @@ describe('Itemized Text Invoice Preservation and Type Separation Test Suite', ()
     await ctx.txService.setAmount(tx.id, 80000);
 
     const caption = await ctx.txService.renderInvoiceCaptionForTransaction(tx.id, simpleNoteText);
-    assert.ok(caption.includes('🧾 INVOICE'));
+    assert.ok(caption.includes('🆔 <b>#INV'));
     assert.ok(caption.includes('💰 Invoice Total: ₩80,000'));
     assert.ok(caption.includes('Monthly cleaning service fee for store front'));
   });

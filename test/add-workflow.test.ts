@@ -204,19 +204,17 @@ describe('/add Workflow Regression Suite', () => {
 
     const primaryCaption = origPhotoMsg.caption;
     assert.ok(primaryCaption);
-    assert.match(primaryCaption, /🧾 INVOICE • #INV0001/);
-    assert.match(primaryCaption, /🏢 Meat Supplier/);
-    assert.match(primaryCaption, /📥 Original Registration:/);
-    assert.match(primaryCaption, /💵 Registered Amount:\n└─> 💰 ₩240,000/);
-    assert.match(primaryCaption, /➕ Invoice Addition/);
-    assert.match(primaryCaption, /💵 Amount Added:\n└─> 💰 ₩230,000/);
+    assert.match(primaryCaption, /🆔 <b>#INV0001 • 🏢 Meat Supplier<\/b>/);
+    assert.match(primaryCaption, /📥📥📥/);
+    assert.match(primaryCaption, /💰 ₩240,000/);
+    assert.match(primaryCaption, /➕➕➕/);
+    assert.match(primaryCaption, /💰 ₩230,000/);
     assert.match(primaryCaption, /📝 Note: Additional ribs/);
     assert.match(primaryCaption, /💰 Invoice Total: ₩470,000/);
-    assert.match(primaryCaption, /⚖️ Need to Pay: ₩470,000/);
-    assert.match(primaryCaption, /📊 Status: ⏳ PENDING/);
+    assert.match(primaryCaption, /<b>⚖️ Need to Pay: ₩470,000<\/b>/);
 
     // Heading appears strictly once
-    const headingMatches = primaryCaption.match(/🧾 INVOICE • #INV0001/g);
+    const headingMatches = primaryCaption.match(/🆔 <b>#INV0001 • 🏢 Meat Supplier<\/b>/g);
     assert.equal(headingMatches?.length, 1, 'Heading must appear exactly once');
 
     // Copy Account Number button is attached to companion message
@@ -692,20 +690,18 @@ describe('/add Workflow Regression Suite', () => {
 
     // 2. Caption includes invoice identity, distributor, action history, and financial summary
     const primaryCaption = origPhotoMsg.caption;
-    assert.match(primaryCaption, /🧾 INVOICE • #INV0001/);
-    assert.match(primaryCaption, /🏢 Koreta/);
+    assert.match(primaryCaption, /🆔 <b>#INV0001 • 🏢 Koreta<\/b>/);
     assert.doesNotMatch(primaryCaption, /🏦 Bank:/, 'Bank name must NOT appear in primary caption');
     assert.doesNotMatch(primaryCaption, /012-345678-2341/, 'Bank account number must NOT appear in primary caption');
     assert.doesNotMatch(primaryCaption, /Koreta CoLtd/, 'Account holder must NOT appear in primary caption');
-    assert.match(primaryCaption, /Original Registration:/);
-    assert.match(primaryCaption, /Registered Amount:\n└─> 💰 ₩450,000/);
-    assert.match(primaryCaption, /Invoice Addition/);
-    assert.match(primaryCaption, /Amount Added:\n└─> 💰 ₩200,000/);
-    assert.match(primaryCaption, /📊 FINANCIAL SUMMARY/);
+    assert.match(primaryCaption, /📥📥📥/);
+    assert.match(primaryCaption, /💰 ₩450,000/);
+    assert.match(primaryCaption, /➕➕➕/);
+    assert.match(primaryCaption, /💰 ₩200,000/);
+    assert.match(primaryCaption, /📊📊📊/);
     assert.match(primaryCaption, /💰 Invoice Total: ₩650,000/);
     assert.match(primaryCaption, /💵 Total Paid: ₩0/);
-    assert.match(primaryCaption, /⚖️ Need to Pay: ₩650,000/);
-    assert.match(primaryCaption, /📊 Status: ⏳ PENDING/);
+    assert.match(primaryCaption, /<b>⚖️ Need to Pay: ₩650,000<\/b>/);
 
     // 3. Companion message with Copy Account Number exists
     const buttonMsg = ctx.sentMessages.find(
@@ -800,13 +796,13 @@ describe('/add Workflow Regression Suite', () => {
 
     const primaryCaption = origPhotoMsg.caption;
     assert.ok(primaryCaption);
-    assert.match(primaryCaption, /📥 Original Registration:/);
-    assert.match(primaryCaption, /💵 Registered Amount:\n└─> 💰 ₩450,000/);
-    assert.match(primaryCaption, /➕ Invoice Addition/);
-    assert.match(primaryCaption, /💵 Amount Added:\n└─> 💰 ₩50,000/);
+    assert.match(primaryCaption, /📥📥📥/);
+    assert.match(primaryCaption, /💰 ₩450,000/);
+    assert.match(primaryCaption, /➕➕➕/);
+    assert.match(primaryCaption, /💰 ₩50,000/);
     assert.match(primaryCaption, /📝 Note: Delivery fee/);
     assert.match(primaryCaption, /💰 Invoice Total: ₩500,000/);
-    assert.match(primaryCaption, /⚖️ Need to Pay: ₩500,000/);
+    assert.match(primaryCaption, /<b>⚖️ Need to Pay: ₩500,000<\/b>/);
 
     // 6. Assert Copy Account Number button is attached to companion message
     const buttonMsg = ctx.sentMessages.find(
@@ -830,7 +826,7 @@ describe('/add Workflow Regression Suite', () => {
     assert.ok(controlMsgs.length >= 1, 'Account-control message must be present');
 
     // 9. Assert invoice heading occurs exactly once
-    const headingMatches = primaryCaption.match(/🧾 INVOICE • #INV0001/g);
+    const headingMatches = primaryCaption.match(/🆔 <b>#INV0001 • 🏢 Meat Supplier<\/b>/g);
     assert.equal(headingMatches?.length, 1, 'Invoice heading must appear strictly once in final caption');
   });
 });

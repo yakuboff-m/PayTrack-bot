@@ -204,19 +204,16 @@ describe('Invoice Workflow: Primary Message & Account-Control Message Lifecycle'
     const invoiceMsg = invoiceMediaMessages[0];
 
     // Assert: Primary caption has approved structure, bank details included directly in caption
-    assert.match(invoiceMsg.caption, /🧾 INVOICE • #INV0001/);
+    assert.match(invoiceMsg.caption, /🆔 <b>#INV0001 • 🏢 Koreta Meat Co<\/b>/);
     assert.match(invoiceMsg.caption, /🏦 Bank: Hana Bank/);
     assert.match(invoiceMsg.caption, /🔢 Account: 012-345678-2341/);
     assert.match(invoiceMsg.caption, /👤 Holder: Koreta CoLtd/);
-    assert.match(invoiceMsg.caption, /🏢 Koreta Meat Co/);
-    assert.match(invoiceMsg.caption, /📜 ACTION HISTORY/);
-    assert.match(invoiceMsg.caption, /📥 Original Registration:/);
-    assert.match(invoiceMsg.caption, /💵 Registered Amount:\n└─> 💰 ₩350,000/);
-    assert.match(invoiceMsg.caption, /📊 FINANCIAL SUMMARY/);
+    assert.match(invoiceMsg.caption, /📥📥📥/);
+    assert.match(invoiceMsg.caption, /💰 ₩350,000/);
+    assert.match(invoiceMsg.caption, /📊📊📊/);
     assert.match(invoiceMsg.caption, /💰 Invoice Total: ₩350,000/);
     assert.match(invoiceMsg.caption, /💵 Total Paid: ₩0/);
-    assert.match(invoiceMsg.caption, /⚖️ Need to Pay: ₩350,000/);
-    assert.match(invoiceMsg.caption, /📊 Status: ⏳ PENDING/);
+    assert.match(invoiceMsg.caption, /<b>⚖️ Need to Pay: ₩350,000<\/b>/);
 
     // Primary message HAS the inline keyboard attached directly
     assert.ok(invoiceMsg.reply_markup?.inline_keyboard, 'Primary media message must have inline keyboard');
@@ -285,14 +282,14 @@ describe('Invoice Workflow: Primary Message & Account-Control Message Lifecycle'
     // Caption is on the primary message (the first message in the album)
     const albumCaption = origInAlbum.caption;
     assert.ok(albumCaption);
-    assert.match(albumCaption, /🧾 INVOICE • #INV0001/);
-    assert.match(albumCaption, /📥 Original Registration:/);
-    assert.match(albumCaption, /💵 Registered Amount:\n└─> 💰 ₩300,000/);
-    assert.match(albumCaption, /➕ Invoice Addition/);
-    assert.match(albumCaption, /💵 Amount Added:\n└─> 💰 ₩150,000/);
+    assert.match(albumCaption, /🆔 <b>#INV0001 • 🏢 Koreta Meat Co<\/b>/);
+    assert.match(albumCaption, /📥📥📥/);
+    assert.match(albumCaption, /💰 ₩300,000/);
+    assert.match(albumCaption, /➕➕➕/);
+    assert.match(albumCaption, /💰 ₩150,000/);
     assert.match(albumCaption, /📝 Note: Special marinade/);
     assert.match(albumCaption, /💰 Invoice Total: ₩450,000/);
-    assert.match(albumCaption, /⚖️ Need to Pay: ₩450,000/);
+    assert.match(albumCaption, /<b>⚖️ Need to Pay: ₩450,000<\/b>/);
 
     // Replacement account-control message exists
     const controlMsgs = ctx.sentMessages.filter(
@@ -412,8 +409,7 @@ describe('Invoice Workflow: Primary Message & Account-Control Message Lifecycle'
     const editedPending = ctx.editedCaptions.find((e) => e.message_id === 400);
     assert.ok(editedPending);
     assert.match(editedPending.caption, /💵 Total Paid: ₩200,000/);
-    assert.match(editedPending.caption, /⚖️ Need to Pay: ₩300,000/);
-    assert.match(editedPending.caption, /📊 Status: ⏳ PARTIALLY PAID/);
+    assert.match(editedPending.caption, /<b>⚖️ Need to Pay: ₩300,000<\/b>/);
 
     // Assert: In Confirmed topic, payment summary is an ordinary visible text message
     const confirmedTextMsg = ctx.sentMessages.find(
@@ -541,13 +537,12 @@ describe('Invoice Workflow: Primary Message & Account-Control Message Lifecycle'
     assert.ok(origInvoiceMsg, 'Original invoice message must be sent');
     const origInvoiceMsgId = origInvoiceMsg.message_id;
 
-    assert.match(origInvoiceMsg.caption, /🧾 INVOICE • #INV0001/);
+    assert.match(origInvoiceMsg.caption, /🆔 <b>#INV0001 • 🏢 Koreta Meat Co<\/b>/);
     assert.match(origInvoiceMsg.caption, /🏦 Bank: Hana Bank/);
     assert.match(origInvoiceMsg.caption, /🔢 Account: 012-345678-2341/);
     assert.match(origInvoiceMsg.caption, /👤 Holder: Koreta CoLtd/);
-    assert.match(origInvoiceMsg.caption, /🏢 Koreta Meat Co/);
     assert.match(origInvoiceMsg.caption, /💰 Invoice Total: ₩300,000/);
-    assert.match(origInvoiceMsg.caption, /⚖️ Need to Pay: ₩300,000/);
+    assert.match(origInvoiceMsg.caption, /<b>⚖️ Need to Pay: ₩300,000<\/b>/);
 
     // Copy Account Number button is attached directly to the invoice message
     assert.ok(origInvoiceMsg.reply_markup?.inline_keyboard, 'Inline keyboard must be attached directly to invoice');
@@ -591,9 +586,8 @@ describe('Invoice Workflow: Primary Message & Account-Control Message Lifecycle'
     assert.ok(step2Edit, 'Invoice caption must be edited in place');
     assert.match(step2Edit.caption, /🏦 Bank: Hana Bank/);
     assert.match(step2Edit.caption, /🔢 Account: 012-345678-2341/);
-    assert.match(step2Edit.caption, /👤 Holder: Koreta CoLtd/);
-    assert.match(step2Edit.caption, /➕ Invoice Addition/);
-    assert.match(step2Edit.caption, /💵 Amount Added:\n└─> 💰 ₩50,000/);
+    assert.match(step2Edit.caption, /➕➕➕/);
+    assert.match(step2Edit.caption, /💰 ₩50,000/);
     assert.match(step2Edit.caption, /📝 Note: Extra cuts/);
     assert.match(step2Edit.caption, /💰 Invoice Total: ₩350,000/);
 
@@ -666,7 +660,7 @@ describe('Invoice Workflow: Primary Message & Account-Control Message Lifecycle'
     assert.ok(addInAlbum, 'Added photo must be present in replacement media group');
     const albumMsgId = origInAlbum.message_id;
 
-    assert.match(origInAlbum.caption, /🧾 INVOICE • #INV0001/);
+    assert.match(origInAlbum.caption, /🆔 <b>#INV0001 • 🏢 Koreta Meat Co<\/b>/);
     assert.doesNotMatch(origInAlbum.caption, /🏦 Bank:/, 'Bank details must not be in album caption');
     assert.doesNotMatch(origInAlbum.caption, /012-345678-2341/, 'Account number must not be in album caption');
     assert.doesNotMatch(origInAlbum.caption, /Hana Bank/, 'Bank name must not be in album caption');
@@ -825,11 +819,10 @@ describe('Invoice Workflow: Primary Message & Account-Control Message Lifecycle'
       (m) => m.document === 'doc_invoice_contract' || m.document?.file_id === 'doc_invoice_contract'
     );
     assert.ok(docInvoiceMsg, 'Document invoice message must be sent');
-    assert.match(docInvoiceMsg.caption, /🧾 INVOICE • #INV0001/);
+    assert.match(docInvoiceMsg.caption, /🆔 <b>#INV0001 • 🏢 Koreta Meat Co<\/b>/);
     assert.match(docInvoiceMsg.caption, /🏦 Bank: Hana Bank/);
     assert.match(docInvoiceMsg.caption, /🔢 Account: 012-345678-2341/);
     assert.match(docInvoiceMsg.caption, /👤 Holder: Koreta CoLtd/);
-    assert.match(docInvoiceMsg.caption, /🏢 Koreta Meat Co/);
 
     // Inline button attached directly to document message
     assert.ok(docInvoiceMsg.reply_markup?.inline_keyboard, 'Inline keyboard must be attached directly to document');
@@ -891,8 +884,7 @@ describe('Invoice Workflow: Primary Message & Account-Control Message Lifecycle'
 
     const cashInvoiceMsg = ctx.sentMessages.find((m) => m.photo === 'photo_cash_only');
     assert.ok(cashInvoiceMsg, 'Invoice message must be sent');
-    assert.match(cashInvoiceMsg.caption, /🧾 INVOICE • #INV0001/);
-    assert.match(cashInvoiceMsg.caption, /🏢 Cash-Only Supplier/);
+    assert.match(cashInvoiceMsg.caption, /🆔 <b>#INV0001 • 🏢 Cash-Only Supplier<\/b>/);
 
     // Missing bank details must NOT produce placeholders like "undefined", "null", or empty bank labels
     assert.doesNotMatch(cashInvoiceMsg.caption, /🏦 Bank:/);

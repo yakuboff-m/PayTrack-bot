@@ -221,17 +221,16 @@ describe('Regression Repair Sequence Suite', () => {
     assert.equal(tx1.mediaType, 'photo');
 
     // Verify caption and inline keyboard directly on primary photo invoice message
-    assert.match(registeredBotMsg.caption, /🧾 INVOICE • #INV0001/);
+    assert.match(registeredBotMsg.caption, /🆔 <b>#INV0001 • 🏢 Koreta<\/b>/);
     assert.match(registeredBotMsg.caption, /🏦 Bank: Hana Bank/);
     assert.match(registeredBotMsg.caption, /🔢 Account: 012-345678-2341/);
     assert.match(registeredBotMsg.caption, /👤 Holder: Koreta CoLtd/);
-    assert.match(registeredBotMsg.caption, /🏢 Koreta/);
-    assert.match(registeredBotMsg.caption, /📥 Original Registration:/);
-    assert.match(registeredBotMsg.caption, /💵 Registered Amount:\n└─> 💰 ₩340,000/);
+    assert.match(registeredBotMsg.caption, /📥📥📥/);
+    assert.match(registeredBotMsg.caption, /💰 ₩340,000/);
+    assert.match(registeredBotMsg.caption, /📊📊📊/);
     assert.match(registeredBotMsg.caption, /💰 Invoice Total: ₩340,000/);
     assert.match(registeredBotMsg.caption, /💵 Total Paid: ₩0/);
-    assert.match(registeredBotMsg.caption, /⚖️ Need to Pay: ₩340,000/);
-    assert.match(registeredBotMsg.caption, /📊 Status: ⏳ PENDING/);
+    assert.match(registeredBotMsg.caption, /<b>⚖️ Need to Pay: ₩340,000<\/b>/);
 
     // Copy Account Number button is attached directly to the initial invoice message
     assert.equal(
@@ -292,25 +291,25 @@ describe('Regression Repair Sequence Suite', () => {
 
     // Verify caption format on the new media message
     const combinedCaption = primaryAlbumMsg.caption;
-    assert.match(combinedCaption, /🧾 INVOICE • #INV0001/);
+    assert.match(combinedCaption, /🆔 <b>#INV0001 • 🏢 Koreta<\/b>/);
     assert.doesNotMatch(combinedCaption, /🏦 Bank:/, 'Bank details must not be in album caption');
     assert.doesNotMatch(combinedCaption, /🔢 Account:/, 'Account details must not be in album caption');
     assert.doesNotMatch(combinedCaption, /👤 Holder:/, 'Holder details must not be in album caption');
     assert.doesNotMatch(combinedCaption, /012-345678-2341/, 'Account number must not be in album caption');
     assert.doesNotMatch(combinedCaption, /Hana Bank/, 'Bank name must not be in album caption');
     assert.doesNotMatch(combinedCaption, /Koreta CoLtd/, 'Holder name must not be in album caption');
-    assert.match(combinedCaption, /📥 Original Registration:/);
-    assert.match(combinedCaption, /💵 Registered Amount:\n└─> 💰 ₩340,000/);
-    assert.match(combinedCaption, /➕ Invoice Addition/);
-    assert.match(combinedCaption, /💵 Amount Added:\n└─> 💰 ₩200,000/);
+    assert.match(combinedCaption, /📥📥📥/);
+    assert.match(combinedCaption, /💰 ₩340,000/);
+    assert.match(combinedCaption, /➕➕➕/);
+    assert.match(combinedCaption, /💰 ₩200,000/);
     assert.match(combinedCaption, /📝 Note: what about note/);
+    assert.match(combinedCaption, /📊📊📊/);
     assert.match(combinedCaption, /💰 Invoice Total: ₩540,000/);
     assert.match(combinedCaption, /💵 Total Paid: ₩0/);
-    assert.match(combinedCaption, /⚖️ Need to Pay: ₩540,000/);
-    assert.match(combinedCaption, /📊 Status: ⏳ PENDING/);
+    assert.match(combinedCaption, /<b>⚖️ Need to Pay: ₩540,000<\/b>/);
 
     // Heading appears strictly once
-    const headingMatches = combinedCaption.match(/🧾 INVOICE • #INV0001/g);
+    const headingMatches = combinedCaption.match(/🆔 <b>#INV0001 • 🏢 Koreta<\/b>/g);
     assert.equal(headingMatches?.length, 1, 'Invoice heading must appear strictly once in final caption');
 
     // Verify original invoice message was updated with notice and direct link
@@ -393,25 +392,21 @@ describe('Regression Repair Sequence Suite', () => {
 
     const finalCaption = latestEdit.caption;
 
-    // Check divider counts: exactly 6 divider lines
-    const dividerMatches = finalCaption.match(/━━━━━━━━━━━━/g);
-    assert.equal(dividerMatches?.length, 6, 'Must contain exactly 6 divider lines');
-
     // Verify all 3 chronological action history blocks are present
-    assert.match(finalCaption, /📥 Original Registration:/);
-    assert.match(finalCaption, /💵 Registered Amount:\n└─> 💰 ₩340,000/);
-    assert.match(finalCaption, /➕ Invoice Addition/);
-    assert.match(finalCaption, /💵 Amount Added:\n└─> 💰 ₩200,000/);
+    assert.match(finalCaption, /📥📥📥/);
+    assert.match(finalCaption, /💰 ₩340,000/);
+    assert.match(finalCaption, /➕➕➕/);
+    assert.match(finalCaption, /💰 ₩200,000/);
     assert.match(finalCaption, /📝 Note: what about note/);
-    assert.match(finalCaption, /➖ Partial payment/);
-    assert.match(finalCaption, /💵 Amount paid:\n└─> 💰 ₩140,000/);
-    assert.match(finalCaption, /🧾 Receipt URL:\n└─> 🔗 https:\/\/t\.me\/c\/4463761895\/\d+/);
+    assert.match(finalCaption, /➖➖➖/);
+    assert.match(finalCaption, /💰 ₩140,000/);
+    assert.match(finalCaption, /🔗 Receipt URL: https:\/\/t\.me\/c\/4463761895\/\d+/);
 
     // Verify Financial Summary
+    assert.match(finalCaption, /📊📊📊/);
     assert.match(finalCaption, /💰 Invoice Total: ₩540,000/);
     assert.match(finalCaption, /💵 Total Paid: ₩140,000/);
-    assert.match(finalCaption, /⚖️ Need to Pay: ₩400,000/);
-    assert.match(finalCaption, /📊 Status: ⏳ PARTIALLY PAID/);
+    assert.match(finalCaption, /<b>⚖️ Need to Pay: ₩400,000<\/b>/);
 
     // Verify account-control message remains present during partial payment
     const controlMsgDuringPartial = sentMessages.find(

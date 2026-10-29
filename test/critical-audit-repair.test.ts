@@ -581,10 +581,10 @@ describe('Critical Transaction Workflow Audit & Repair Regression Suite', () => 
 
     // New photo message sent with updated total and addition details
     const newPhotoMsg = sentMessages.find((m) => m.photo === 'extra_delivery_photo');
-    assert.ok(newPhotoMsg, 'New invoice photo message must be sent');
     assert.match(newPhotoMsg.caption, /Invoice Total: ₩150,000/);
-    assert.match(newPhotoMsg.caption, /Amount Added:\n└─> 💰 ₩50,000/);
-    assert.match(newPhotoMsg.caption, /Need to Pay: ₩150,000/);
+    assert.match(newPhotoMsg.caption, /➕➕➕/);
+    assert.match(newPhotoMsg.caption, /💰 ₩50,000/);
+    assert.match(newPhotoMsg.caption, /<b>⚖️ Need to Pay: ₩150,000<\/b>/);
 
     // Assert replacement account control message was sent
     const accountDetailsMsgs = sentMessages.filter(
