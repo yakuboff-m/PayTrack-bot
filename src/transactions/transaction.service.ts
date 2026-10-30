@@ -307,7 +307,8 @@ export class TransactionService {
 
     const hasAnyMedia =
       Boolean(tx.mediaFileId || tx.mediaType) ||
-      additions.some((a) => Boolean(a.media_file_id || a.media_type));
+      additions.some((a) => Boolean(a.media_file_id || a.media_type)) ||
+      tx.invoiceType === 'MEDIA';
 
     const isItemized =
       !hasAnyMedia &&
@@ -341,21 +342,16 @@ export class TransactionService {
     }
 
     let cleanItems = '';
-    let isMeat = false;
-    if (rawContent) {
+    if (!hasAnyMedia && rawContent) {
       const { original } = splitOriginalAndMetadata(rawContent);
       cleanItems = stripDuplicateTotalLines(original);
-      if (/MEAT INVOICE/i.test(rawContent)) {
-        isMeat = true;
-      }
     }
 
     return buildUnifiedInvoiceCaption({
       invoiceId: tx.id,
-      title: isMeat ? '🥩 MEAT INVOICE' : '🧾 INVOICE',
       distributor: tx.distributorSnapshot,
       itemsBreakdown: cleanItems,
-      originalText: tx.originalText || rawContent,
+      originalText: !hasAnyMedia ? (tx.originalText || rawContent) : undefined,
       isMedia: hasAnyMedia,
       isItemized: false,
       receivedAt: tx.receivedAt,
@@ -1386,6 +1382,7 @@ export class TransactionService {
       const isMedia =
         originalMediaType === 'photo' ||
         originalMediaType === 'document' ||
+        transaction.invoiceType === 'MEDIA' ||
         Boolean(repliedMessage.photo || repliedMessage.document);
 
       // Compose caption
@@ -1422,23 +1419,25 @@ export class TransactionService {
           hasSeparateAccountControlMessage: false,
         });
       } else {
-        const { original } = splitOriginalAndMetadata(repliedText);
-        const cleanItems = stripDuplicateTotalLines(original);
-        const isMeat = /MEAT INVOICE/i.test(repliedText);
+        const hasMedia = isMedia || hasAddedMedia;
+        let cleanItems = '';
+        if (!hasMedia && repliedText) {
+          const { original } = splitOriginalAndMetadata(repliedText);
+          cleanItems = stripDuplicateTotalLines(original);
+        }
 
         safeCaption = buildUnifiedInvoiceCaption({
           invoiceId: transaction.id,
-          title: isMeat ? '🥩 MEAT INVOICE' : '🧾 INVOICE',
           distributor: transaction.distributorSnapshot,
           itemsBreakdown: cleanItems,
-          isMedia: isMedia || hasAddedMedia,
+          isMedia: hasMedia,
           receivedAt: transaction.receivedAt,
           initialAmount,
           currentAmount: newTotalAmount,
           additions: additionsList,
           payments: paymentsList,
           notes: transaction.notes,
-          maxCaptionLength: isMedia ? MAX_CAPTION_LENGTH : MAX_TEXT_LENGTH,
+          maxCaptionLength: hasMedia ? MAX_CAPTION_LENGTH : MAX_TEXT_LENGTH,
           hasSeparateAccountControlMessage: hasAddedMedia ? true : Boolean(transaction.accountControlMessageId),
         });
       }

@@ -461,4 +461,184 @@ describe('Itemized Text Invoice Preservation and Type Separation Test Suite', ()
     assert.equal(rowUnchanged?.amount, 150000);
     assert.equal(rowUnchanged?.invoice_type, null);
   });
+
+  it('5. Regression assertions: exact rendered media caption output, section spacing, and obsolete heading removal', async () => {
+    const ctx = await setupTestContext();
+
+    // Create a distributor matching prompt specifications
+    const dist = await ctx.distService.create({
+      name: 'Ikhlas Market',
+      alias: 'ikhlas',
+      bankName: '우리은행(Woori Bank)',
+      accountNumber: '1005-704-764624',
+      accountHolder: 'IKHLAS MARKET',
+    });
+
+    // 1. Media Invoice with additions and payments
+    const mediaTx = await ctx.txService.registerTransaction(
+      String(testConfig.telegramGroupId),
+      testConfig.pendingTopicId,
+      5001,
+      undefined,
+      'photo_file_ikhlas_35',
+      'photo',
+      'MEDIA'
+    );
+    const snap = ctx.distService.createSnapshot(dist);
+    await ctx.txService.assignDistributor(mediaTx.id, dist.id, snap);
+    await ctx.txService.setAmount(mediaTx.id, 2099589);
+
+    // Add addition
+    await ctx.txRepo.recordAddition(
+      mediaTx.id,
+      200000,
+      '2026-10-29T12:01:00.000Z',
+      null,
+      null,
+      null,
+      'òtgan safargi astatka'
+    );
+    // Add payment
+    await ctx.txRepo.recordPayment(
+      mediaTx.id,
+      500000,
+      '2026-10-29T12:05:00.000Z',
+      null,
+      null,
+      null
+    );
+
+    // Render caption using the exact production service method
+    const caption = await ctx.txService.renderInvoiceCaptionForTransaction(
+      mediaTx.id,
+      '🧾 MEAT INVOICE\n━━━━━━━━━━━━━━━━\n1. beef 10kg 15000'
+    );
+
+    // Rule A: MEAT INVOICE must NEVER appear in media caption
+    assert.equal(
+      caption.includes('MEAT INVOICE'),
+      false,
+      'Regression: "MEAT INVOICE" must NOT appear in a media invoice caption'
+    );
+
+    // Rule B: Obsolete horizontal dividers must NEVER appear in media caption
+    assert.equal(
+      caption.includes('━━━━━━━━━━━━━━━━'),
+      false,
+      'Regression: obsolete heading divider "━━━━━━━━━━━━━━━━" must NOT appear'
+    );
+    assert.equal(
+      caption.includes('━━━━━━━━━━━━'),
+      false,
+      'Regression: divider "━━━━━━━━━━━━" must NOT appear in media caption'
+    );
+
+    // Rule C: Section headings must have ZERO blank lines between heading and first content line
+    assert.equal(
+      caption.includes('📥📥📥\n\n'),
+      false,
+      'Regression: 📥📥📥 must not be followed by two newlines'
+    );
+    assert.match(
+      caption,
+      /📥📥📥\n🕧/,
+      '📥📥📥 must be followed immediately by timestamp line'
+    );
+
+    assert.equal(
+      caption.includes('➕➕➕\n\n'),
+      false,
+      'Regression: ➕➕➕ must not be followed by two newlines'
+    );
+    assert.match(
+      caption,
+      /➕➕➕\n🕧/,
+      '➕➕➕ must be followed immediately by timestamp line'
+    );
+
+    assert.equal(
+      caption.includes('➖➖➖\n\n'),
+      false,
+      'Regression: ➖➖➖ must not be followed by two newlines'
+    );
+    assert.match(
+      caption,
+      /➖➖➖\n🕧/,
+      '➖➖➖ must be followed immediately by timestamp line'
+    );
+
+    assert.equal(
+      caption.includes('📊📊📊\n\n'),
+      false,
+      'Regression: 📊📊📊 must not be followed by two newlines'
+    );
+    assert.match(
+      caption,
+      /📊📊📊\n💰/,
+      '📊📊📊 must be followed immediately by Invoice Total line'
+    );
+
+    // Rule D: Exactly ONE blank line before each section heading
+    assert.match(caption, /\n\n📥📥📥/, 'Must have exactly one blank line before 📥📥📥');
+    assert.match(caption, /\n\n➕➕➕/, 'Must have exactly one blank line before ➕➕➕');
+    assert.match(caption, /\n\n➖➖➖/, 'Must have exactly one blank line before ➖➖➖');
+    assert.match(caption, /\n\n📊📊📊/, 'Must have exactly one blank line before 📊📊📊');
+
+    // Rule E: Bold header and bold Need to Pay
+    assert.match(
+      caption,
+      /^🆔 <b>#INV\d+ • 🏢 Ikhlas Market<\/b>/,
+      'Must contain required bold invoice header'
+    );
+    assert.match(
+      caption,
+      /<b>⚖️ Need to Pay: ₩1,799,589<\/b>/,
+      'Must contain bold Need to Pay line'
+    );
+
+    // Rule F: Bank details attached directly to header with single newline
+    assert.match(
+      caption,
+      /🆔 <b>#INV\d+ • 🏢 Ikhlas Market<\/b>\n🏦 Bank: 우리은행\(Woori Bank\)\n🔢 Account: 1005-704-764624\n👤 Holder: IKHLAS MARKET/,
+      'Header and bank details must be consecutive lines without empty lines'
+    );
+
+    // 2. Text-only itemized invoice: retains all items and zero blank lines after 📄📄📄
+    const textRaw = [
+      '🧾 MEAT INVOICE',
+      '━━━━━━━━━━━━━━━━',
+      '1. Beef ribeye — 10 kg',
+      '　10 kg × ₩15,000',
+      '　= ₩150,000',
+      '',
+      '2. Lamb chop — 5 kg',
+      '　5 kg × ₩20,000',
+      '　= ₩100,000',
+    ].join('\n');
+
+    const textTx = await ctx.txService.registerTransaction(
+      String(testConfig.telegramGroupId),
+      testConfig.pendingTopicId,
+      6001,
+      undefined,
+      null,
+      null,
+      'ITEMIZED_TEXT',
+      textRaw
+    );
+    await ctx.txService.assignDistributor(textTx.id, dist.id, snap);
+    await ctx.txService.setAmount(textTx.id, 250000);
+
+    const textCaption = await ctx.txService.renderInvoiceCaptionForTransaction(textTx.id, textRaw);
+
+    // Text invoice must retain all items
+    assert.ok(textCaption.includes('1. Beef ribeye — 10 kg'));
+    assert.ok(textCaption.includes('2. Lamb chop — 5 kg'));
+    // Text invoice must use 📄📄📄 without double newline
+    assert.equal(textCaption.includes('📄📄📄\n\n'), false);
+    assert.match(textCaption, /📄📄📄\n1\. Beef ribeye/);
+    // Text invoice must strip obsolete MEAT INVOICE heading and divider
+    assert.equal(textCaption.includes('MEAT INVOICE'), false);
+    assert.equal(textCaption.includes('━━━━━━━━━━━━━━━━'), false);
+  });
 });

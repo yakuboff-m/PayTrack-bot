@@ -440,7 +440,6 @@ export function extractItemizedTextFromMessage(text: string): string {
 
 export interface BuildUnifiedInvoiceCaptionParams {
   invoiceId: number;
-  title?: string;
   distributor?: DistributorSnapshot | null;
   itemsBreakdown?: string | null;
   originalText?: string | null;
@@ -486,8 +485,7 @@ export function extractCleanItemizedItems(rawText: string): string {
 
     if (!started) {
       if (!lineTrimmed) continue;
-      if (/^🥩\s*MEAT INVOICE/i.test(lineTrimmed)) continue;
-      if (/^🧾\s*INVOICE/i.test(lineTrimmed)) continue;
+      if (/^(?:🧾|🥩|💰)?\s*(?:MEAT\s+)?INVOICE\b/i.test(lineTrimmed)) continue;
       if (/^📄{1,3}/i.test(lineTrimmed)) continue;
       if (/^[━─—═-]+$/.test(lineTrimmed)) continue;
       if (/^🆔\s*#?INV/i.test(lineTrimmed)) continue;
@@ -556,6 +554,10 @@ export function buildUnifiedInvoiceCaption(params: BuildUnifiedInvoiceCaptionPar
     if (accountHolder) bankLines.push(`👤 Holder: ${escapeHtml(accountHolder)}`);
   }
 
+  const headerBlock = bankLines.length > 0
+    ? `${header}\n${bankLines.join('\n')}`
+    : header;
+
   // ── 3. Invoice-Specific Content (ONLY for text-only invoices) ─
   let itemSection: string | null = null;
   if (!params.isMedia) {
@@ -563,7 +565,7 @@ export function buildUnifiedInvoiceCaption(params: BuildUnifiedInvoiceCaptionPar
     if (params.isItemized) {
       const cleanItems = extractCleanItemizedItems(rawItems);
       if (cleanItems.length > 0) {
-        itemSection = `📄📄📄\n\n${cleanItems}`;
+        itemSection = `📄📄📄\n${cleanItems}`;
       }
     } else if (rawItems) {
       const clean = stripDuplicateTotalLines(rawItems);
@@ -577,7 +579,6 @@ export function buildUnifiedInvoiceCaption(params: BuildUnifiedInvoiceCaptionPar
   const regAmt = summary.originalAmount !== null ? formatAmount(summary.originalAmount) : 'Not set';
   const regLines: string[] = [
     '📥📥📥',
-    '',
     `🕧 ${formatTimestamp(params.receivedAt)}`,
     `💰 ${regAmt}`,
   ];
@@ -629,7 +630,6 @@ export function buildUnifiedInvoiceCaption(params: BuildUnifiedInvoiceCaptionPar
     if (item.type === 'addition') {
       const lines = [
         '➕➕➕',
-        '',
         `🕧 ${formatTimestamp(item.date)}`,
         `💰 ${formatAmount(item.amount)}`,
       ];
@@ -644,7 +644,6 @@ export function buildUnifiedInvoiceCaption(params: BuildUnifiedInvoiceCaptionPar
     if (item.type === 'payment') {
       const lines = [
         '➖➖➖',
-        '',
         `🕧 ${formatTimestamp(item.date)}`,
         `💰 ${formatAmount(item.amount)}`,
       ];
@@ -664,7 +663,6 @@ export function buildUnifiedInvoiceCaption(params: BuildUnifiedInvoiceCaptionPar
   // ── 5. Financial Summary (Need to Pay in bold) ─────────────
   const summaryLines = [
     '📊📊📊',
-    '',
     `💰 Invoice Total: ${formatAmount(summary.currentInvoiceTotal)}`,
     `💵 Total Paid: ${formatAmount(summary.totalPaid)}`,
     `<b>⚖️ Need to Pay: ${formatAmount(summary.balanceDue)}</b>`,
@@ -672,10 +670,7 @@ export function buildUnifiedInvoiceCaption(params: BuildUnifiedInvoiceCaptionPar
   const summaryBlock = summaryLines.join('\n');
 
   const assemble = (eventBlocks: string[]): string => {
-    const parts: string[] = [header];
-    if (bankLines.length > 0) {
-      parts.push(bankLines.join('\n'));
-    }
+    const parts: string[] = [headerBlock];
     if (itemSection) {
       parts.push(itemSection);
     }

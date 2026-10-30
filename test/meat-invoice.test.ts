@@ -352,7 +352,9 @@ describe('Plain-Text Meat Invoice Calculator', () => {
 
       // Verify bot sent the formatted invoice display with copy button attached directly
       assert.equal(sentMessages.length, 1);
-      assert.match(sentMessages[0].text, /MEAT INVOICE/);
+      assert.match(sentMessages[0].text, /📄📄📄/);
+      assert.match(sentMessages[0].text, /Qozon/);
+      assert.equal(sentMessages[0].text.includes('MEAT INVOICE'), false);
       assert.match(sentMessages[0].text, /₩1,431,216/);
       assert.match(sentMessages[0].text, /Baraka Go'sht/);
       assert.equal(

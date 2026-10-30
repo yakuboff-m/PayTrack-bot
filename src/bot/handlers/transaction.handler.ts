@@ -277,9 +277,9 @@ export function registerTransactionHandler(
         try {
           const isMedia = Boolean(repliedMedia.mediaFileId);
           const repliedText = repliedMsg.text ?? repliedMsg.caption ?? '';
-          const isItemized = meatInvoice ? true : (!isMedia && isItemizedInvoiceText(repliedText));
+          const isItemized = !isMedia && (meatInvoice ? true : isItemizedInvoiceText(repliedText));
           const invType = isMedia ? 'MEDIA' : isItemized ? 'ITEMIZED_TEXT' : 'TEXT_STANDARD';
-          const origText = meatInvoice ? meatInvoice.formattedDisplay : (isItemized ? repliedText : undefined);
+          const origText = !isMedia ? (meatInvoice ? meatInvoice.formattedDisplay : (isItemized ? repliedText : undefined)) : undefined;
 
           transaction = await transactionService.registerTransaction(
             chatId,
@@ -307,11 +307,11 @@ export function registerTransactionHandler(
         transaction.mediaType = repliedMedia.mediaType;
       }
 
-      if (meatInvoice && !transaction.originalText) {
+      if (meatInvoice && !transaction.originalText && !transaction.mediaFileId) {
         await transactionService.updateOriginalText(transaction.id, meatInvoice.formattedDisplay, 'ITEMIZED_TEXT');
         transaction.originalText = meatInvoice.formattedDisplay;
         transaction.invoiceType = 'ITEMIZED_TEXT';
-      } else if (!transaction.originalText && isItemizedInvoiceText(repliedMsg.text ?? repliedMsg.caption ?? '')) {
+      } else if (!transaction.originalText && !transaction.mediaFileId && isItemizedInvoiceText(repliedMsg.text ?? repliedMsg.caption ?? '')) {
         const textToSave = extractItemizedTextFromMessage(repliedMsg.text ?? repliedMsg.caption ?? '');
         await transactionService.updateOriginalText(transaction.id, textToSave, 'ITEMIZED_TEXT');
         transaction.originalText = textToSave;
@@ -349,7 +349,7 @@ export function registerTransactionHandler(
 
       // Re-send or edit with new content
       let displayMsg: Message = repliedMsg;
-      if (meatInvoice) {
+      if (meatInvoice && !transaction.mediaFileId) {
         displayMsg = {
           ...repliedMsg,
           text: repliedMsg.text ? meatInvoice.formattedDisplay : undefined,
